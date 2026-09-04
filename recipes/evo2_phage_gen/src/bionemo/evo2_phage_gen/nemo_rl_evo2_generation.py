@@ -208,6 +208,7 @@ def generate_evo2_native_batched(
             max_seq_length=int(mcore_generation_config["max_model_len"]),
             evo2_seed=initial_seed,
             cuda_graphs_enabled=mcore_generation_config.get("cuda_graph_impl") != "none",
+            cuda_graph_scope=mcore_generation_config.get("inference_cuda_graph_scope", "block"),
         )
         worker._evo2_native_dynamic_components = native_dynamic
     _reseed_evo2_native_dynamic(native_dynamic, initial_seed)

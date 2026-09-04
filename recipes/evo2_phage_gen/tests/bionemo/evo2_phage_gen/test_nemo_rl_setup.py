@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -63,6 +64,60 @@ def test_patch_uses_standard_bridge_config_loader(tmp_path: Path) -> None:
     assert "load_model_config(pretrained_path)" not in setup_source
     assert "_reset_model_runtime_state" not in setup_source
     assert "read_run_config(pretrained_run_config)" not in setup_source
+
+
+def test_policy_replay_keeps_sampled_action(tmp_path: Path) -> None:
+    """Replay keeps a sampled token finite if recomputed logits move it outside top-k."""
+    source = _cached_source()
+    if source is None:
+        pytest.skip("configured NeMo-RL source is not cached")
+    build = nemo_rl_setup._copy_build_source(source, tmp_path / "build")
+    nemo_rl_setup.apply_source_patch(build)
+
+    script = """
+import torch
+
+from nemo_rl.algorithms.logits_sampling_utils import apply_top_k_top_p
+
+sampled = torch.tensor([5])
+for top_k, top_p in ((5, 1.0), (None, 0.9), (5, 0.999)):
+    logits = torch.tensor([[6.0, 5.0, 4.0, 3.0, 2.0, 1.0]], requires_grad=True)
+    unconditioned, ordinary_mask = apply_top_k_top_p(logits, top_k=top_k, top_p=top_p, chunk_size=1)
+    assert torch.isneginf(unconditioned.gather(-1, sampled[:, None])).all()
+
+    filtered, keep_mask = apply_top_k_top_p(
+        logits,
+        top_k=top_k,
+        top_p=top_p,
+        chunk_size=1,
+        target_token_ids=sampled,
+    )
+    selected_logprob = torch.log_softmax(filtered, dim=-1).gather(-1, sampled[:, None]).sum()
+    assert torch.isfinite(selected_logprob)
+    assert keep_mask.gather(-1, sampled[:, None]).all()
+    assert keep_mask.sum() == ordinary_mask.sum() + 1
+    (-selected_logprob).backward()
+    assert torch.isfinite(logits.grad).all()
+    assert logits.grad.gather(-1, sampled[:, None]).ne(0).all()
+
+logits = torch.tensor([[6.0, 5.0, 4.0, 3.0, 2.0, 1.0]])
+supported = torch.tensor([0])
+ordinary_logits, ordinary_mask = apply_top_k_top_p(logits, top_k=5, top_p=0.999, chunk_size=1)
+replay_logits, replay_mask = apply_top_k_top_p(
+    logits,
+    top_k=5,
+    top_p=0.999,
+    chunk_size=1,
+    target_token_ids=supported,
+)
+assert torch.equal(ordinary_logits, replay_logits)
+assert torch.equal(ordinary_mask, replay_mask)
+"""
+    subprocess.run([sys.executable, "-c", script], cwd=build, check=True)
+
+    model_utils = (build / "nemo_rl" / "distributed" / "model_utils.py").read_text()
+    assert model_utils.count("target_token_ids=target_local") == 3
+    assert "target_token_ids=next_tokens" in model_utils
 
 
 def test_environment_metrics_receive_one_task_namespace(tmp_path: Path) -> None:
@@ -119,6 +174,10 @@ def test_runtime_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
             return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
         if name.endswith(".datasets.utils"):
             return SimpleNamespace(resolve_external_dataset_class=lambda name: name)
+        if name.endswith(".logits_sampling_utils"):
+            return SimpleNamespace(
+                apply_top_k_top_p=lambda logits, top_k, top_p, chunk_size=None, target_token_ids=None: logits
+            )
         return SimpleNamespace(init_ray=init_ray)
 
     monkeypatch.setattr(nemo_rl_setup.importlib, "import_module", import_module)
@@ -136,10 +195,36 @@ def test_runtime_capabilities_require_external_dataset_resolution(monkeypatch: p
             return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
         if name.endswith(".datasets.utils"):
             return SimpleNamespace()
+        if name.endswith(".logits_sampling_utils"):
+            return SimpleNamespace(
+                apply_top_k_top_p=lambda logits, top_k, top_p, chunk_size=None, target_token_ids=None: logits
+            )
         return SimpleNamespace(init_ray=init_ray)
 
     monkeypatch.setattr(nemo_rl_setup, "_runtime_is_complete", lambda: True)
     monkeypatch.setattr(nemo_rl_setup.importlib, "import_module", import_module)
 
     with pytest.raises(RuntimeError, match="external recipe datasets"):
+        nemo_rl_setup.assert_nemo_rl_runtime()
+
+
+def test_runtime_requires_sampled_action_support(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale install fails before filtered policy replay can erase sampled actions."""
+
+    def init_ray(log_dir=None, *, include_dashboard=True, num_cpus=None):
+        return None
+
+    def import_module(name):
+        if name.endswith(".grpo"):
+            return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
+        if name.endswith(".datasets.utils"):
+            return SimpleNamespace(resolve_external_dataset_class=lambda name: name)
+        if name.endswith(".logits_sampling_utils"):
+            return SimpleNamespace(apply_top_k_top_p=lambda logits, top_k, top_p, chunk_size=None: logits)
+        return SimpleNamespace(init_ray=init_ray)
+
+    monkeypatch.setattr(nemo_rl_setup, "_runtime_is_complete", lambda: True)
+    monkeypatch.setattr(nemo_rl_setup.importlib, "import_module", import_module)
+
+    with pytest.raises(RuntimeError, match="sampled actions in filtered log-probability support"):
         nemo_rl_setup.assert_nemo_rl_runtime()

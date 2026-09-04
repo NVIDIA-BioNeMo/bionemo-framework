@@ -717,6 +717,53 @@ def test_evo2_adapter_forwards_generation_controls(monkeypatch):
     }
 
 
+def test_adapter_forwards_graph_scope(monkeypatch):
+    prompt_tokens = torch.tensor([[11, 12], [21, 22]])
+    prompt_lengths = torch.tensor([2, 2])
+    sampling_params = [SimpleNamespace(num_tokens_to_generate=2, top_k=5, top_p=0.999)] * 2
+    setup_kwargs = {}
+    native_dynamic = SimpleNamespace(forward_model=object(), evo2_seed=0, sampling_rng=None)
+    worker = SimpleNamespace(
+        cfg={
+            "generation": {
+                "mcore_generation_config": {
+                    "max_model_len": 5632,
+                    "prompt_batch_size": 2,
+                    "cuda_graph_impl": "local",
+                    "inference_cuda_graph_scope": "block",
+                }
+            }
+        },
+        model=SimpleNamespace(decoder=SimpleNamespace(hyena_state_shapes_per_request=lambda: None)),
+        megatron_tokenizer=_Tokenizer(),
+    )
+
+    def fake_setup(**kwargs):
+        setup_kwargs.update(kwargs)
+        return native_dynamic
+
+    monkeypatch.setattr("bionemo.evo2.run.infer._setup_native_dynamic_components", fake_setup)
+    monkeypatch.setattr(
+        "bionemo.evo2.run.infer.generate",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(
+                prompt_tokens=prompt_tokens[index, : prompt_lengths[index]].tolist(),
+                generated_tokens=[65],
+                generated_log_probs=[-0.1],
+                finish_reason="length",
+                stopped_on_eos=False,
+                memory={},
+            )
+            for index in range(2)
+        ],
+    )
+
+    evo2_generation.generate_evo2_native_batched(worker, prompt_tokens, prompt_lengths, sampling_params)
+
+    assert setup_kwargs["cuda_graphs_enabled"] is True
+    assert setup_kwargs["cuda_graph_scope"] == "block"
+
+
 def test_megatron_generation_shards_adapter_input_across_dp_and_gathers_in_order():
     class _ShardingAnnotations:
         def get_axis_size(self, axis):

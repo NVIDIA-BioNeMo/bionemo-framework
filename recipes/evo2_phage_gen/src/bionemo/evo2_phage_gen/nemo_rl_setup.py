@@ -35,6 +35,7 @@ RECIPE_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_PATCH = RECIPE_ROOT / "patches" / "nemo-rl-evo2-mbridge-grpo.patch"
 REQUIRED_MODULES = (
     "nemo_rl.algorithms.grpo",
+    "nemo_rl.algorithms.logits_sampling_utils",
     "nemo_rl.data.processors",
     "nemo_rl.models.generation.megatron.megatron_worker",
     "nemo_rl.models.megatron.setup",
@@ -143,12 +144,16 @@ def assert_nemo_rl_runtime() -> None:
     if not _runtime_is_complete():
         raise RuntimeError("NeMo-RL is missing modules required by the Evo2 phage recipe")
     grpo = importlib.import_module("nemo_rl.algorithms.grpo")
+    logits_sampling = importlib.import_module("nemo_rl.algorithms.logits_sampling_utils")
     cluster = importlib.import_module("nemo_rl.distributed.virtual_cluster")
     dataset_utils = importlib.import_module("nemo_rl.data.datasets.utils")
     if not callable(getattr(grpo, "split_environment_timing_metrics", None)):
         raise RuntimeError("NeMo-RL is missing environment timing support")
     if not callable(getattr(dataset_utils, "resolve_external_dataset_class", None)):
         raise RuntimeError("NeMo-RL is missing support for external recipe datasets")
+    sampling_parameters = inspect.signature(logits_sampling.apply_top_k_top_p).parameters
+    if "target_token_ids" not in sampling_parameters:
+        raise RuntimeError("NeMo-RL cannot retain sampled actions in filtered log-probability support")
     parameters = inspect.signature(cluster.init_ray).parameters
     if not {"include_dashboard", "num_cpus"}.issubset(parameters):
         raise RuntimeError("NeMo-RL is missing local Ray resource controls")

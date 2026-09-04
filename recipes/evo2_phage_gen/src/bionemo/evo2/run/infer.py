@@ -440,6 +440,75 @@ def _unwrap_hyena_model(model: torch.nn.Module) -> torch.nn.Module:
     return inner
 
 
+def _ensure_native_dynamic_cuda_graph_managers(
+    hyena_model: torch.nn.Module,
+    *,
+    cuda_graph_scope: str,
+) -> int:
+    """Late-install graph managers omitted when a colocated model was built for training.
+
+    Standalone inference selects local graphs before model construction. Colocated RL normally
+    constructs from a training config with graphs disabled and enables them only for rollout;
+    MCore's runtime toggle restores existing managers but does not create missing ones.
+    """
+    normalized_scope = str(getattr(cuda_graph_scope, "name", cuda_graph_scope)).lower()
+    if normalized_scope not in {"block", "layer"}:
+        raise ValueError(f"Unsupported CUDA graph scope {cuda_graph_scope!r}; expected 'block' or 'layer'")
+
+    graph_scope = InferenceCudaGraphScope[normalized_scope]
+    modules = list(hyena_model.modules())
+    for module in modules:
+        config = getattr(module, "config", None)
+        if config is None:
+            continue
+        config.cuda_graph_impl = "local"
+        config.inference_cuda_graph_scope = graph_scope
+        config.cuda_graph_scope = []
+
+    managers = [manager for module in modules if (manager := getattr(module, "cudagraph_manager", None)) is not None]
+    if managers:
+        return len(managers)
+
+    # Optional MCore machinery: import it only when the training-built model needs a manager.
+    from megatron.core.transformer.cuda_graphs import CudaGraphManager
+
+    decoder = getattr(hyena_model, "decoder", None)
+    if decoder is None:
+        raise RuntimeError("Evo2 CUDA graphs require a decoder graph owner")
+    if normalized_scope == "block":
+        decoder_config = getattr(decoder, "config", getattr(hyena_model, "config", None))
+        if decoder_config is None:
+            raise RuntimeError("Evo2 decoder has no TransformerConfig for CUDA graph construction")
+        create_manager = getattr(decoder, "create_mcore_cudagraph_manager", None)
+        if callable(create_manager):
+            create_manager(decoder_config)
+        else:
+            decoder.cudagraph_manager = CudaGraphManager(decoder_config)
+    else:
+        for layer in getattr(decoder, "layers", ()):
+            layer_config = getattr(layer, "config", getattr(hyena_model, "config", None))
+            create_manager = getattr(layer, "create_mcore_cudagraph_manager", None)
+            if callable(create_manager):
+                create_manager(layer_config)
+            elif layer_config is not None:
+                layer.cudagraph_manager = CudaGraphManager(layer_config)
+
+    manager_count = sum(
+        1 for module in hyena_model.modules() if getattr(module, "cudagraph_manager", None) is not None
+    )
+    if manager_count == 0:
+        raise RuntimeError(
+            f"Could not create an Evo2 {normalized_scope}-scope CUDA graph manager for the training-built model"
+        )
+    if int(os.environ.get("RANK", "0")) == 0:
+        logger.info(
+            "[evo2-native-cg] late-installed %d %s-scope CUDA graph manager(s) for colocated inference",
+            manager_count,
+            normalized_scope,
+        )
+    return manager_count
+
+
 def _setup_native_dynamic_components(
     *,
     model: torch.nn.Module,
@@ -475,15 +544,24 @@ def _setup_native_dynamic_components(
                 logger.warning("[evo2-native] set_model_to_sequence_parallel failed: %r", exc)
         hyena_model.config.sequence_parallel = False
 
+    if cuda_graph_scope is None:
+        configured_scope = getattr(hyena_model.config, "inference_cuda_graph_scope", None)
+        cuda_graph_scope = str(getattr(configured_scope, "name", configured_scope or "none"))
+    cuda_graph_scope = str(getattr(cuda_graph_scope, "name", cuda_graph_scope)).lower()
     ctx_cls = make_evo2_dynamic_inference_context_cls()
     mamba_cfg = build_evo2_mamba_inference_state_config(raw_model)
     # Allocate modal pole-table storage before graph capture. Later in-place optimizer/refit
     # updates refresh its values during prefill without changing graph-captured addresses.
     warmed_modal_layers = warm_packed_hyena_caches(hyena_model)
-    cuda_graph_manager_count = sum(1 for module in hyena_model.modules() if hasattr(module, "cudagraph_manager"))
-    if cuda_graph_scope is None:
-        configured_scope = getattr(hyena_model.config, "inference_cuda_graph_scope", None)
-        cuda_graph_scope = str(getattr(configured_scope, "name", configured_scope or "none"))
+    if cuda_graphs_enabled:
+        cuda_graph_manager_count = _ensure_native_dynamic_cuda_graph_managers(
+            hyena_model,
+            cuda_graph_scope=cuda_graph_scope,
+        )
+    else:
+        cuda_graph_manager_count = sum(
+            1 for module in hyena_model.modules() if getattr(module, "cudagraph_manager", None) is not None
+        )
     if precision_kind is None:
         precision_kind = inference_precision_kind(hyena_model.config)
     if precision_parameter_storage is None:

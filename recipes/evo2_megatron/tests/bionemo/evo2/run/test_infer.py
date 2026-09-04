@@ -692,6 +692,31 @@ def test_validate_cuda_graph_capture_records_every_block_graph_runner():
     assert native.cuda_graph_replay_verified is True
 
 
+def test_late_graph_manager_for_block_scope(monkeypatch):
+    """A model built for training gains the graph manager skipped during construction."""
+    manager = SimpleNamespace(cudagraph_runners=[])
+    config = SimpleNamespace(
+        cuda_graph_impl="none",
+        inference_cuda_graph_scope=InferenceCudaGraphScope.none,
+        cuda_graph_scope=None,
+    )
+    decoder = SimpleNamespace(config=config)
+    model = SimpleNamespace(config=config, decoder=decoder)
+    model.modules = lambda: [model, decoder]
+
+    from megatron.core.transformer import cuda_graphs
+
+    monkeypatch.setattr(cuda_graphs, "CudaGraphManager", lambda received_config: manager)
+
+    count = infer_module._ensure_native_dynamic_cuda_graph_managers(model, cuda_graph_scope="block")
+
+    assert count == 1
+    assert decoder.cudagraph_manager is manager
+    assert config.cuda_graph_impl == "local"
+    assert config.inference_cuda_graph_scope is InferenceCudaGraphScope.block
+    assert config.cuda_graph_scope == []
+
+
 def test_validate_layer_cuda_graph_capture_allows_one_fixed_attention_runner():
     """Paged attention keeps one max-request graph while packed Hyena keys each request count."""
 

@@ -777,3 +777,203 @@ index 7d50355..ea55326 100644
      )
      logger.info(
          f"Started local cluster with tag '{cvd_tag}': {ray.cluster_resources()}"
+diff --git a/nemo_rl/algorithms/logits_sampling_utils.py b/nemo_rl/algorithms/logits_sampling_utils.py
+index d90451593..8bac86a45 100644
+--- a/nemo_rl/algorithms/logits_sampling_utils.py
++++ b/nemo_rl/algorithms/logits_sampling_utils.py
+@@ -70,6 +70,7 @@ def need_top_k_or_top_p_filtering(
+ def _apply_top_k_only_fn(
+     logits: torch.Tensor,
+     top_k: int | None,
++    target_token_ids: torch.Tensor | None = None,
+ ) -> tuple[torch.Tensor, torch.Tensor | None]:
+     """Apply top-k mask to the logits.
+
+@@ -84,6 +85,7 @@ def _apply_top_k_only_fn(
+     Args:
+         logits: Input logits tensor of shape [*, vocab_size].
+         top_k: Top-k sampling parameter.
++        target_token_ids: Optional observed tokens to union into support during policy replay.
+
+     Returns:
+         filtered_logits: Filtered logits tensor with the same shape as input logits.
+@@ -98,6 +100,8 @@ def _apply_top_k_only_fn(
+     top_k_values, _ = torch.topk(logits, top_k, dim=-1)
+     threshold = top_k_values[..., -1:].expand_as(logits)
+     keep_mask = logits >= threshold
++    if target_token_ids is not None:
++        keep_mask.scatter_(-1, target_token_ids.unsqueeze(-1), True)
+
+     # Apply mask: keep top-k values, set others to -inf
+     logits = torch.where(
+@@ -114,6 +118,7 @@ def _apply_top_k_top_p_fn(
+     top_k: int | None,
+     top_p: float,
+     chunk_size: int | None = TOP_K_TOP_P_CHUNK_SIZE,
++    target_token_ids: torch.Tensor | None = None,
+ ) -> tuple[torch.Tensor, torch.Tensor | None]:
+     """Apply top-k and top-p masks to the logits with chunking for memory efficiency.
+
+@@ -134,22 +139,34 @@ def _apply_top_k_top_p_fn(
+         top_k: Top-k sampling parameter. Set to -1 or None to consider all tokens.
+         top_p: Top-p (nucleus) sampling parameter. Must be in (0, 1]. Set to 1 to consider all tokens
+         chunk_size: Number of tokens to process per chunk for memory efficiency. Defaults to TOP_K_TOP_P_CHUNK_SIZE.
++        target_token_ids: Optional observed tokens to union into support during policy replay.
+
+     Returns:
+         filtered_logits: Filtered logits tensor with the same shape as input logits.
+         keep_mask: Mask tensor with the same shape as input logits, where 1 (True) indicates
+             tokens to be kept, 0 (False) indicates tokens to be masked.
+     """
++    original_shape = logits.shape
++    vocab_size = logits.shape[-1]
++    if target_token_ids is not None:
++        if target_token_ids.shape != original_shape[:-1]:
++            raise ValueError(
++                f"target_token_ids shape {target_token_ids.shape} must match logits prefix shape {original_shape[:-1]}"
++            )
++        target_token_ids = target_token_ids.to(device=logits.device, dtype=torch.long)
++
+     if not _need_top_p_filtering(top_p):
+         if not _need_top_k_filtering(top_k):
+             return logits, None
+         # Avoid sorting vocab for top-k only case
+-        filtered_logits, top_k_keep_mask = _apply_top_k_only_fn(logits, top_k)
++        filtered_logits, top_k_keep_mask = _apply_top_k_only_fn(
++            logits, top_k, target_token_ids
++        )
+         return filtered_logits, top_k_keep_mask
+
+     # Save original shape and flatten to 2D for consistent chunking
+-    original_shape = logits.shape
+-    vocab_size = logits.shape[-1]
++    if target_token_ids is not None:
++        target_token_ids = target_token_ids.reshape(-1)
+     logits = logits.view(-1, vocab_size)  # [*, vocab_size] -> [num_tokens, vocab_size]
+     num_tokens = logits.shape[0]
+
+@@ -198,6 +215,11 @@ def _apply_top_k_top_p_fn(
+         else:
+             chunk_mask = top_p_keep_mask_chunk
+         chunk_mask = chunk_mask.scatter(dim=-1, index=logits_idx, src=chunk_mask)
++        if target_token_ids is not None:
++            chunk_targets = target_token_ids[start_idx:end_idx].unsqueeze(-1)
++            target_logits = chunk_logits.gather(-1, chunk_targets)
++            chunk_filtered.scatter_(-1, chunk_targets, target_logits)
++            chunk_mask.scatter_(-1, chunk_targets, True)
+
+         # Store results
+         filtered_logits[start_idx:end_idx, :] = chunk_filtered
+@@ -220,6 +242,7 @@ class _ApplyTopKTopP(torch.autograd.Function):
+         top_k: Optional[int],
+         top_p: float,
+         chunk_size: int | None = TOP_K_TOP_P_CHUNK_SIZE,
++        target_token_ids: torch.Tensor | None = None,
+     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+         """Apply top-k/top-p filtering and save masks for backward.
+
+@@ -228,9 +251,10 @@ class _ApplyTopKTopP(torch.autograd.Function):
+             top_k: Top-k sampling parameter. Set to -1 or None to consider all tokens.
+             top_p: Top-p sampling parameter. Must be in (0, 1]. Set to 1 to consider all tokens.
+             chunk_size: Number of tokens to process per chunk. Defaults to TOP_K_TOP_P_CHUNK_SIZE.
++            target_token_ids: Optional observed tokens to union into support during policy replay.
+         """
+         filtered_logits, keep_mask = _apply_top_k_top_p_fn(
+-            logits, top_k, top_p, chunk_size
++            logits, top_k, top_p, chunk_size, target_token_ids
+         )
+
+         # Save masks for backward pass
+@@ -248,7 +272,7 @@ class _ApplyTopKTopP(torch.autograd.Function):
+         if keep_mask is not None:
+             grad_filtered_logits = grad_filtered_logits.masked_fill(~keep_mask, 0.0)
+
+-        return grad_filtered_logits, None, None, None
++        return grad_filtered_logits, None, None, None, None
+
+
+ def apply_top_k_top_p(
+@@ -256,6 +280,7 @@ def apply_top_k_top_p(
+     top_k: int | None,
+     top_p: float,
+     chunk_size: int | None = TOP_K_TOP_P_CHUNK_SIZE,
++    target_token_ids: torch.Tensor | None = None,
+ ) -> tuple[torch.Tensor, torch.Tensor | None]:
+     """Apply top-k and top-p masks to the logits with proper gradient handling.
+
+@@ -274,6 +299,9 @@ def apply_top_k_top_p(
+         top_k: Top-k sampling parameter. Set to -1 to consider all tokens.
+         top_p: Top-p (nucleus) sampling parameter. Must be in (0, 1]. Set to 1 to consider all tokens.
+         chunk_size: Number of tokens to process per chunk. Defaults to TOP_K_TOP_P_CHUNK_SIZE.
++        target_token_ids: Optional observed tokens to union into support. This is used when replaying
++            sampled actions against recomputed logits so a top-k/top-p boundary change cannot turn
++            a valid action log-probability into negative infinity.
+
+     Returns:
+         filtered_logits: Filtered logits tensor with the same shape as input logits.
+@@ -282,4 +310,4 @@ def apply_top_k_top_p(
+     """
+     if not _need_top_k_filtering(top_k) and not _need_top_p_filtering(top_p):
+         return logits, None
+-    return _ApplyTopKTopP.apply(logits, top_k, top_p, chunk_size)
++    return _ApplyTopKTopP.apply(logits, top_k, top_p, chunk_size, target_token_ids)
+diff --git a/nemo_rl/distributed/model_utils.py b/nemo_rl/distributed/model_utils.py
+index ad253cf3e..3e7a8ab24 100644
+--- a/nemo_rl/distributed/model_utils.py
++++ b/nemo_rl/distributed/model_utils.py
+@@ -432,7 +432,10 @@ class DistributedLogprobWithSampling(torch.autograd.Function):
+
+         # Apply top-k and top-p filtering locally (returns keep_mask for gradient)
+         logits, keep_mask = apply_top_k_top_p(
+-            seq_parallel_logits, top_k=top_k, top_p=top_p
++            seq_parallel_logits,
++            top_k=top_k,
++            top_p=top_p,
++            target_token_ids=target_local,
+         )
+
+         # Compute log softmax
+@@ -589,7 +592,10 @@ class ChunkedDistributedLogprobWithSampling(torch.autograd.Function):
+
+             # Apply top-k and top-p filtering locally
+             logits_chunk, _ = apply_top_k_top_p(
+-                seq_parallel_logits_chunk, top_k=top_k, top_p=top_p
++                seq_parallel_logits_chunk,
++                top_k=top_k,
++                top_p=top_p,
++                target_token_ids=target_local,
+             )
+
+             # Compute log softmax
+@@ -678,7 +684,10 @@ class ChunkedDistributedLogprobWithSampling(torch.autograd.Function):
+
+             # Rematerialize filtering
+             logits_chunk, keep_mask = apply_top_k_top_p(
+-                seq_parallel_logits_chunk, top_k=top_k, top_p=top_p
++                seq_parallel_logits_chunk,
++                top_k=top_k,
++                top_p=top_p,
++                target_token_ids=target_local,
+             )
+
+             # Rematerialize softmax
+@@ -1624,17 +1633,18 @@ def get_next_token_logprobs_from_logits(
+     else:
+         # Remove last position's logits
+         next_token_logits_wo_last = next_token_logits[:, :-1]
++        next_tokens = input_ids[:, 1:].cuda()  # Skip first token
+         # Apply top-k and top-p filtering
+         next_token_logits_wo_last, _ = apply_top_k_top_p(
+             next_token_logits_wo_last,
+             top_k=sampling_params.top_k if sampling_params is not None else None,
+             top_p=sampling_params.top_p if sampling_params is not None else 1.0,
++            target_token_ids=next_tokens,
+         )
+         # Compute logprobs
+         next_token_logprobs = torch.nn.functional.log_softmax(
+             next_token_logits_wo_last, dim=-1
+         )
+-        next_tokens = input_ids[:, 1:].cuda()  # Skip first token
+         logprobs = next_token_logprobs.gather(
+             dim=-1, index=next_tokens.unsqueeze(-1)
+         ).squeeze(-1)
