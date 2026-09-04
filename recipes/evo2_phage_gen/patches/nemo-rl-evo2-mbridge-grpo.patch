@@ -551,11 +551,29 @@ index 0a0721dd9..00eebb24a 100644
          self.inference_wrapped_model = GPTInferenceWrapper(
              self.model, self.inference_context
          )
-@@ -367,6 +469,15 @@ class MegatronGenerationMixin:
+@@ -347,9 +449,17 @@ class MegatronGenerationMixin:
+         log_gpu_memory("finish_generation START")
+
+         lang_module = unwrap_model(self.model)
++        adapter = self._load_generation_adapter()
++        bypasses_persistent_engine = adapter is not None and getattr(
++            adapter, "bypasses_persistent_mcore_engine", False
++        )
+
+         if self.is_generation_colocated:
+-            if self._inference_engine_initialized and not self._inference_engine_asleep:
++            if (
++                not bypasses_persistent_engine
++                and self._inference_engine_initialized
++                and not self._inference_engine_asleep
++            ):
+                 self._sleep()
+             cuda_graph_impl = self.cfg["generation"]["mcore_generation_config"][
+                 "cuda_graph_impl"
+@@ -367,6 +477,14 @@ class MegatronGenerationMixin:
              gc.collect()
              torch.cuda.empty_cache()
 
-+        adapter = self._load_generation_adapter()
 +        finish_worker = (
 +            getattr(adapter, "finish_worker", None) if adapter is not None else None
 +        )
@@ -567,6 +585,21 @@ index 0a0721dd9..00eebb24a 100644
          log_gpu_memory("finish_generation END")
 
      def prepare_for_generation(self, tags=None, **kwargs) -> None:
+@@ -399,6 +517,14 @@ class MegatronGenerationMixin:
+         if cuda_graph_impl != "none":
+             toggle_cuda_graphs(lang_module, set_to=cuda_graph_impl)
+
++        adapter = self._load_generation_adapter()
++        if adapter is not None and getattr(adapter, "bypasses_persistent_mcore_engine", False):
++            # The adapter drives this same colocated model directly and owns its pointer-stable
++            # dynamic context. The graph toggle above still switches inference-only module state;
++            # only construction/wakeup of MCore's separate coordinator engine is bypassed.
++            log_gpu_memory("prepare_for_generation END")
++            return
++
+         # tags=["weights"] means we are inside refit_policy_generation between
+         # suspend_for_refit and the weight transfer — the engine was intentionally
+         # paused and waking it now would race NVSHMEM init / weight transfer against
 @@ -428,6 +539,13 @@ class MegatronGenerationMixin:
          top_p_val = (
              0.0 if greedy else (float(top_p_cfg) if top_p_cfg is not None else 0.0)

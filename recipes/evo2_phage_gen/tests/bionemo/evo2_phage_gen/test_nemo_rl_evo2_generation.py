@@ -16,6 +16,7 @@
 import json
 import logging
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -455,6 +456,7 @@ def test_evo2_adapter_emits_replicated_batched_data_from_every_model_parallel_ra
 
 def test_finish_generation_keeps_native_engine_across_rollout_cycles(monkeypatch):
     adapter = Evo2MegatronGenerationAdapter({"seed": 17})
+    assert adapter.bypasses_persistent_mcore_engine is True
     context = SimpleNamespace(reset_count=0)
     context.reset = lambda: setattr(context, "reset_count", context.reset_count + 1)
     model = SimpleNamespace()
@@ -516,6 +518,54 @@ def test_finish_generation_keeps_native_engine_across_rollout_cycles(monkeypatch
 
     assert worker._evo2_native_dynamic_components is native_dynamic
     assert context.reset_count == 2
+
+
+def test_nemo_worker_bypasses_generic_engine_for_evo2_adapter(monkeypatch):
+    from nemo_rl.models.generation.megatron import megatron_worker
+
+    adapter = SimpleNamespace(
+        bypasses_persistent_mcore_engine=True,
+        finish_worker=Mock(),
+    )
+    model = SimpleNamespace(
+        config=SimpleNamespace(flash_decode=True),
+        eval=Mock(),
+        rotary_pos_emb=None,
+    )
+    worker = MegatronGenerationMixin()
+    worker.rank = 0
+    worker.model = model
+    worker.cfg = {
+        "generation": {"mcore_generation_config": {"cuda_graph_impl": "local"}},
+    }
+    worker.is_generation_colocated = True
+    worker.should_disable_forward_pre_hook = False
+    worker._inference_engine_initialized = True
+    worker._inference_engine_asleep = False
+    worker._load_generation_adapter = lambda: adapter
+    worker._sleep = Mock()
+    worker._initialize_inference_engine = Mock()
+    worker._run_async_coordinator_start = Mock()
+    worker._wake = Mock()
+    graph_toggles = []
+
+    monkeypatch.setattr(megatron_worker, "unwrap_model", lambda value: value)
+    monkeypatch.setattr(megatron_worker, "log_gpu_memory", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(megatron_worker, "toggle_cuda_graphs", lambda _model, *, set_to: graph_toggles.append(set_to))
+    monkeypatch.setattr(megatron_worker.gc, "collect", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+
+    worker.prepare_for_generation()
+    worker.finish_generation()
+
+    assert model.config.flash_decode is False
+    model.eval.assert_called_once_with()
+    assert graph_toggles == ["local", "none"]
+    worker._sleep.assert_not_called()
+    worker._initialize_inference_engine.assert_not_called()
+    worker._run_async_coordinator_start.assert_not_called()
+    worker._wake.assert_not_called()
+    adapter.finish_worker.assert_called_once_with(worker)
 
 
 def test_graph_adapter_preserves_captured_model_storage():

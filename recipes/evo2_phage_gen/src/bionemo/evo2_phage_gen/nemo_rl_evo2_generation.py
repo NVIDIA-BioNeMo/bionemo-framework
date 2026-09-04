@@ -274,6 +274,9 @@ class Evo2MegatronGenerationAdapter:
     """Recipe-owned adapter for DP-sharded, model-parallel Evo2 generation."""
 
     requires_all_workers = True
+    # This adapter owns a pointer-stable dynamic context and CUDA-graph cache on the colocated
+    # policy model. NeMo-RL must not also construct or wake its separate coordinator engine.
+    bypasses_persistent_mcore_engine = True
 
     def __init__(self, config: dict[str, Any] | None = None):
         """Create an adapter from NeMo-RL generation adapter config."""
