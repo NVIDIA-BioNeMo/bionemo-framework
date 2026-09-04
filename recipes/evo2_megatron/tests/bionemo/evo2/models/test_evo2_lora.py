@@ -432,6 +432,10 @@ def _build_pretrain_config(
     cfg.train.eval_iters = 0
 
     cfg.logger.tensorboard_dir = None
+    # Megatron's warning filter is installed on every existing logger and is not
+    # removed by distributed teardown. Keep this in-process harness from muting
+    # warnings in later tests in the same pytest session.
+    cfg.logger.filter_warnings = False
 
     if pretrained_ckpt_dir:
         cfg.checkpoint.finetune = True
