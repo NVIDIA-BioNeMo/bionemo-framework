@@ -389,6 +389,10 @@ class Evo2NativeDynamicComponents:
     cuda_graph_scope: str
     precision_kind: str
     precision_parameter_storage: str
+    # MCore's training/inference toggle removes ``cudagraph_manager`` attributes while graphs are
+    # disabled. Keep the exact module/manager pairs owned by this persistent inference engine so
+    # the next rollout can restore them without discarding captured runners or their storage.
+    cuda_graph_manager_bindings: tuple[tuple[torch.nn.Module, Any], ...] = field(default_factory=tuple)
     cuda_graph_runner_count: int = 0
     cuda_graph_recorded_count: int = 0
     cuda_graph_replay_verified: bool = False
@@ -507,6 +511,35 @@ def _ensure_native_dynamic_cuda_graph_managers(
     return manager_count
 
 
+def _cuda_graph_manager_bindings(
+    model: torch.nn.Module,
+) -> tuple[tuple[torch.nn.Module, Any], ...]:
+    """Return the module/manager bindings currently installed on ``model``."""
+    return tuple(
+        (module, manager)
+        for module in model.modules()
+        if (manager := getattr(module, "cudagraph_manager", None)) is not None
+    )
+
+
+def _restore_native_dynamic_cuda_graph_managers(nd: Evo2NativeDynamicComponents) -> int:
+    """Restore graph managers removed by MCore's training-mode graph toggle.
+
+    Colocated rollout switches the shared model back to its training graph configuration between
+    calls. MCore implements that transition by deleting each module's ``cudagraph_manager``
+    attribute. The manager objects and captured runners remain valid as long as registered model
+    storage is unchanged, so the persistent native engine retains and restores those exact objects
+    before checking its storage fingerprint.
+    """
+    bindings = getattr(nd, "cuda_graph_manager_bindings", ())
+    for module, manager in bindings:
+        if getattr(module, "cudagraph_manager", None) is not manager:
+            module.cudagraph_manager = manager
+    if bindings:
+        nd.cuda_graph_manager_count = len(bindings)
+    return len(bindings)
+
+
 def _setup_native_dynamic_components(
     *,
     model: torch.nn.Module,
@@ -584,6 +617,7 @@ def _setup_native_dynamic_components(
         cuda_graph_scope=str(cuda_graph_scope),
         precision_kind=str(precision_kind),
         precision_parameter_storage=str(precision_parameter_storage),
+        cuda_graph_manager_bindings=_cuda_graph_manager_bindings(hyena_model),
         max_seq_length_is_auto=max_seq_length is None,
     )
 
@@ -1676,6 +1710,7 @@ def _invalidate_cuda_graphs_for_rebound_model_storage(nd: Evo2NativeDynamicCompo
     """Invalidate graph runners when model offload/reload changed a captured address."""
     if not nd.cuda_graphs_enabled:
         return False
+    _restore_native_dynamic_cuda_graph_managers(nd)
     captured = getattr(nd, "cuda_graph_model_storage_signature", None)
     local_storage_changed = captured is not None and captured != _model_storage_signature(nd.hyena_model)
     if not _graph_parallel_any(local_storage_changed):

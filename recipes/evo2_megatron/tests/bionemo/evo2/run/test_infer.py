@@ -199,6 +199,27 @@ def test_graph_storage_signature_tracks_rebinding():
     assert infer_module._model_storage_signature(model) != rebound_parameter
 
 
+def test_persistent_graph_manager_binding_survives_training_toggle(monkeypatch):
+    """A rollout restores the exact manager object removed while training graphs are off."""
+    manager = SimpleNamespace(cudagraph_runners=[object()])
+    layer = torch.nn.Linear(2, 2)
+    layer.cudagraph_manager = manager
+    nd = SimpleNamespace(
+        cuda_graphs_enabled=True,
+        hyena_model=layer,
+        cuda_graph_model_storage_signature=infer_module._model_storage_signature(layer),
+        cuda_graph_manager_bindings=((layer, manager),),
+        cuda_graph_manager_count=0,
+    )
+    monkeypatch.setattr(infer_module, "_graph_parallel_any", bool)
+
+    del layer.cudagraph_manager
+    assert not infer_module._invalidate_cuda_graphs_for_rebound_model_storage(nd)
+
+    assert layer.cudagraph_manager is manager
+    assert nd.cuda_graph_manager_count == 1
+
+
 @pytest.mark.parametrize("change_source", ["parameter", "buffer", "peer"])
 def test_dynamic_graph_recaptures_after_storage_rebind(monkeypatch, change_source):
     """Validation-first graphs must not survive a colocated model-tensor reallocation."""
