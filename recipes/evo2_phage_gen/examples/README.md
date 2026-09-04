@@ -147,6 +147,11 @@ in a normalized target-preserving support; generation-versus-replay error teleme
 
 `RL_PROMPT_BATCH_SIZE` controls the packed mixed-length decode group size (default 12); set a larger
 value only on a qualified device profile that has enough memory for the corresponding cache.
+Optimizer state is offloaded during generation by default. On a device with measured HBM capacity,
+`policy.generation.mcore_generation_config.generation_adapter_config.preserve_optimizer_state_during_generation=true`
+avoids that per-step CPU round trip while still offloading gradients. Qualify it in a disposable
+full-shape train→generation→train pilot using PyTorch allocated/reserved memory and observed peaks,
+not `nvidia-smi` aggregate accounting.
 
 To stop after the sweep and scoring, before prompt banks or RL are created, run:
 

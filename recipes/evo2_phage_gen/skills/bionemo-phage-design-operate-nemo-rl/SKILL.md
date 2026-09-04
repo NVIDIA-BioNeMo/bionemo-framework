@@ -24,7 +24,9 @@ Retain the first sampled EOD and its log-probability in each row's policy trajec
 Treat a pilot that partitions mixed prompt lengths into sequential decode waves or falls back to
 single-request generation as an operational failure. The packed native adapter must send the full
 mixed-length request group in one call and preserve row order; accept the pilot marker only after
-the configured full-shape group uses packed batched prefill and decode.
+the configured full-shape group uses packed batched prefill and decode. Leave optimizer retention
+during generation disabled unless a disposable full-shape pilot establishes sufficient HBM capacity
+through a complete train→generation→train cycle.
 
 For the realized PhiX pilot and resume procedure, read the
 [example README](../../examples/README.md) as the source of truth. Preserve separate durable states

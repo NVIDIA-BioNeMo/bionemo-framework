@@ -654,12 +654,36 @@ def test_graph_adapter_recaptures_quantized_graphs_after_refit(precision_kind, v
     assert native_dynamic.cuda_graph_force_recapture is expected
 
 
-@pytest.mark.parametrize(("storage_required", "expected_move_params"), [(False, True), (True, False)])
-def test_refit_offload_respects_graph_storage(monkeypatch, storage_required, expected_move_params):
+def test_evo2_adapter_optimizer_retention_is_opt_in():
+    assert Evo2MegatronGenerationAdapter().preserve_optimizer_state_during_generation is False
+    adapter = Evo2MegatronGenerationAdapter({"preserve_optimizer_state_during_generation": True})
+    worker = SimpleNamespace(_load_generation_adapter=lambda: adapter)
+
+    assert adapter.preserve_optimizer_state_during_generation is True
+    assert MegatronGenerationMixin._generation_adapter_preserves_optimizer_state(worker)
+
+
+@pytest.mark.parametrize(
+    ("storage_required", "resources_already_offloaded", "expected_move_params", "expected_nested_offload"),
+    [
+        (False, False, True, True),
+        (False, True, True, False),
+        (True, False, False, True),
+        (True, True, False, False),
+    ],
+)
+def test_refit_offload_respects_persistent_resources(
+    monkeypatch,
+    storage_required,
+    resources_already_offloaded,
+    expected_move_params,
+    expected_nested_offload,
+):
     calls = []
     model = SimpleNamespace(eval=lambda: calls.append(("eval",)))
     worker = SimpleNamespace(
         model=model,
+        _generation_offload_before_refit_complete=resources_already_offloaded,
         _generation_adapter_requires_persistent_model_storage=lambda: storage_required,
         move_model=lambda moved_model, device, **kwargs: (
             calls.append(("move", moved_model, device, kwargs)) or moved_model
@@ -675,10 +699,57 @@ def test_refit_offload_respects_graph_storage(monkeypatch, storage_required, exp
 
     MegatronPolicyWorkerImpl.offload_after_refit(worker)
 
-    move_call = calls[0]
-    assert move_call[:3] == ("move", model, "cpu")
-    assert move_call[3]["move_params"] is expected_move_params
-    assert calls[1:] == [("eval",), ("offload-before-refit",), ("refit-complete",)]
+    assert calls[0] == (
+        "move",
+        model,
+        "cpu",
+        {
+            "move_params": expected_move_params,
+            "move_grads": False,
+        },
+    )
+    expected_tail = [("eval",)]
+    if expected_nested_offload:
+        expected_tail.append(("offload-before-refit",))
+    expected_tail.append(("refit-complete",))
+    assert calls[1:] == expected_tail
+
+
+@pytest.mark.parametrize(
+    ("preserve_optimizer", "expected_moves"),
+    [(False, ["cpu", "cuda"]), (True, ["cuda"])],
+)
+def test_generation_resource_marker_tracks_training(monkeypatch, preserve_optimizer, expected_moves):
+    model = SimpleNamespace(
+        modules=lambda: (),
+        train=Mock(),
+    )
+    optimizer_moves = []
+    worker = SimpleNamespace(
+        rank=0,
+        model=model,
+        optimizer=object(),
+        optimizer_cpu_offload=False,
+        fp8_cfg=None,
+        cfg={"megatron_cfg": {"empty_unused_memory_level": 0, "clear_memory_caches_before_refit": False}},
+        _generation_adapter_preserves_optimizer_state=lambda: preserve_optimizer,
+        move_model=Mock(side_effect=lambda moved_model, *_args, **_kwargs: moved_model),
+        move_optimizer=optimizer_moves.append,
+    )
+    monkeypatch.setattr(torch.cuda.nvtx, "range_push", lambda _name: None)
+    monkeypatch.setattr(torch.cuda.nvtx, "range_pop", lambda: None)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch, "randn", lambda *_args, **_kwargs: SimpleNamespace(cuda=lambda: None))
+
+    MegatronPolicyWorkerImpl.offload_before_refit(worker)
+    assert worker._generation_offload_before_refit_complete is True
+    worker.move_model.assert_any_call(model, "cpu", move_params=False, move_grads=True)
+
+    MegatronPolicyWorkerImpl.prepare_for_training(worker)
+    assert worker._generation_offload_before_refit_complete is False
+    assert optimizer_moves == expected_moves
 
 
 def test_evo2_adapter_aggregates_cold_and_multi_group_timings_by_stable_group_id(monkeypatch):

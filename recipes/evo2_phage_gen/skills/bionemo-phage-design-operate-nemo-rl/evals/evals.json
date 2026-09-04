@@ -253,6 +253,20 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-020-optimizer-residency",
+      "prompt": "A persistent Evo2 RL run spends four minutes moving Adam state to CPU before every rollout. A full-shape measurement suggests the optimizer can remain in HBM, but nvidia-smi and allocator accounting disagree. Decide how to test the optimization without risking the active run.",
+      "expected_output": "Keep the default offload behavior for the active run and qualify the explicit optimizer-residency opt-in in a disposable full-shape lifecycle pilot using allocator evidence.",
+      "assertions": [
+        "The response does not modify or pause the active run.",
+        "It keeps optimizer retention default-false and enables it only as an explicit capacity opt-in.",
+        "It still offloads gradient buffers during generation.",
+        "It validates a complete train-to-generation-to-train cycle at full shape.",
+        "It uses PyTorch allocated and reserved memory plus observed peak behavior rather than relying on nvidia-smi aggregate accounting alone."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

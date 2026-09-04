@@ -315,6 +315,10 @@ class Evo2MegatronGenerationAdapter:
         self.config = dict(config or {})
         self.seed_stride = int(self.config.get("seed_stride", 1_000_003))
         self.call_index_offset = int(self.config.get("call_index_offset", 0))
+        preserve_optimizer = self.config.get("preserve_optimizer_state_during_generation", False)
+        if not isinstance(preserve_optimizer, bool):
+            raise ValueError("preserve_optimizer_state_during_generation must be a boolean")
+        self.preserve_optimizer_state_during_generation = preserve_optimizer
 
     def requires_persistent_model_storage(self, worker: Any) -> bool:
         """Keep model tensors resident only after a CUDA graph has captured their storage."""

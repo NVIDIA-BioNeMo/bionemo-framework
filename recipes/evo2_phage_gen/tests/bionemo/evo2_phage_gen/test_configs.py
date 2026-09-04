@@ -248,6 +248,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert mcore_generation_config["generation_adapter_config"]["ignore_eos"] is False
     assert mcore_generation_config["generation_adapter_config"]["preserve_eos_token"] is True
     assert mcore_generation_config["generation_adapter_config"]["strict_generation"] is True
+    assert mcore_generation_config["generation_adapter_config"]["preserve_optimizer_state_during_generation"] is False
     assert config["policy"]["sequence_packing"]["enabled"] is False
     assert config["logger"]["wandb_enabled"] is False
     assert config["logger"]["wandb"]["name"] == "phix174-gdpo"
