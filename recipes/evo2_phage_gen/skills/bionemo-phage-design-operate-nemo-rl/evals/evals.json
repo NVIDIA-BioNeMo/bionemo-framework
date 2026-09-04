@@ -267,6 +267,21 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-021-periodic-replay-mismatch",
+      "prompt": "A two-cycle full-batch top-p pilot masks 22/96 and then 17/96 rows at the configured generation-versus-replay guard. Both EOD-terminated and length-capped rows are affected. Median token error is 0.14, but the largest errors recur at positions 513, 769, 1537, and 2049, and position modulo 256 equals 1 has four times the overall mean error. The unmasked subset has finite rewards. Qualify and launch the run.",
+      "expected_output": "Reject qualification and diagnose a paged-state boundary defect using unmasked selected-action evidence before launching training.",
+      "assertions": [
+        "The response does not treat mismatch masking as successful filtering or accept the finite surviving subset.",
+        "It analyzes every active selected action before masking and separates EOD-terminated from length-capped rows.",
+        "It reports per-token and per-sequence error, worst absolute positions, and error grouped by absolute position modulo the paged-KV block size rather than trusting the aggregate median.",
+        "It identifies the stable 256-token phase as evidence for packed or paged state corruption rather than attributing the mismatch only to EOD or top-p support.",
+        "It withholds the pilot marker and optimizer update until two complete generation-to-replay/refit cycles pass at the deployed batch shape, topology, precision, graph scope, page size, and KV-index dispatch.",
+        "It does not use a smaller BF16 or TP profile, a trajectory-only comparison, or a forward-only replay approximation to qualify a materially different rollout profile."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }
