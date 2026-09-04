@@ -136,6 +136,10 @@ assert torch.equal(ordinary_mask, replay_mask)
     assert "self._generation_adapter_requires_persistent_model_storage()" in worker
     assert 'self.model, "cpu", move_params=not preserve_model_storage' in worker
     assert "self._generation_adapter_model_refit_complete()" in worker
+    generation_worker = (build / "nemo_rl" / "models" / "generation" / "megatron" / "megatron_worker.py").read_text()
+    assert "def _generation_adapter_requires_persistent_model_storage(" in generation_worker
+    package_init = (build / "nemo_rl" / "__init__.py").read_text()
+    assert "EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION = 1" in package_init
 
 
 def test_environment_metrics_receive_one_task_namespace(tmp_path: Path) -> None:
@@ -188,6 +192,8 @@ def test_runtime_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(nemo_rl_setup, "_runtime_is_complete", lambda: True)
 
     def import_module(name):
+        if name == "nemo_rl":
+            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=1)
         if name.endswith(".grpo"):
             return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
         if name.endswith(".datasets.utils"):
@@ -197,7 +203,7 @@ def test_runtime_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
                 apply_top_k_top_p=lambda logits, top_k, top_p, chunk_size=None, target_token_ids=None: logits
             )
         if name.endswith(".megatron_worker"):
-            return SimpleNamespace(MegatronGenerationMixin=_GenerationWorkerMixin)
+            raise AssertionError("the CUDA-free runtime check must not import the Megatron worker")
         return SimpleNamespace(init_ray=init_ray)
 
     monkeypatch.setattr(nemo_rl_setup.importlib, "import_module", import_module)
@@ -211,6 +217,8 @@ def test_runtime_capabilities_require_external_dataset_resolution(monkeypatch: p
         return None
 
     def import_module(name):
+        if name == "nemo_rl":
+            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=1)
         if name.endswith(".grpo"):
             return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
         if name.endswith(".datasets.utils"):
@@ -237,6 +245,8 @@ def test_runtime_requires_sampled_action_support(monkeypatch: pytest.MonkeyPatch
         return None
 
     def import_module(name):
+        if name == "nemo_rl":
+            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=1)
         if name.endswith(".grpo"):
             return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
         if name.endswith(".datasets.utils"):
@@ -272,6 +282,8 @@ def test_runtime_requires_graph_storage_lifecycle(
         return None
 
     def import_module(name):
+        if name == "nemo_rl":
+            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=0)
         if name.endswith(".grpo"):
             return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
         if name.endswith(".datasets.utils"):

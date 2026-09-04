@@ -18,6 +18,14 @@ diff --git a/pyproject.toml b/pyproject.toml
  license = { text = "Apache 2.0" }
  maintainers = [
 
+diff --git a/nemo_rl/__init__.py b/nemo_rl/__init__.py
+--- a/nemo_rl/__init__.py
++++ b/nemo_rl/__init__.py
+@@ -56,0 +57,4 @@
++
++# Recipe-patch capability marker used by CUDA-free installation checks. The source-level
++# recipe tests separately verify the worker and policy-offload implementation sites.
++EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION = 1
 diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
 index e5647bae7..b8603d049 100644
 --- a/nemo_rl/algorithms/grpo.py
