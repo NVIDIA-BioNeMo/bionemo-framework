@@ -214,11 +214,11 @@
     },
     {
       "id": "bionemo-phage-design-operate-nemo-rl-017-mixed-prompt-batch-fallback",
-      "prompt": "A full-shape PhiX GDPO pilot reaches validation, then logs `batched decode group failed` because prompts have different lengths and falls back to single-request decode. No pilot marker or checkpoint exists. Continue without repeating SFT or calibration.",
-      "expected_output": "Reject the slow fallback, group mixed validation prompts by token length while preserving result order, and rerun the incomplete pilot from the same result root.",
+      "prompt": "A full-shape PhiX GDPO pilot receives mixed-length prompts but partitions them into sequential decode waves, with a single-request fallback for one wave. No pilot marker or checkpoint exists. Continue without repeating SFT or calibration.",
+      "expected_output": "Reject the partitioned/fallback rollout, send the complete mixed-length group through one packed native call while preserving row order, and rerun the incomplete pilot from the same result root.",
       "assertions": [
-        "The response treats single-request fallback as an operational pilot failure rather than accepting an impractically slow validation pass.",
-        "It stable-partitions inputs into homogeneous token-length groups and restores results to their original prompt indices.",
+        "The response treats sequential waves or single-request fallback as an operational pilot failure.",
+        "It sends the complete heterogeneous group through one packed native call and preserves the original prompt order.",
         "It does not create the pilot or pilot-check completion marker.",
         "It reruns stage 40 from the same result root, reusing completed SFT, calibration, prompt banks, and prepared SFT checkpoint.",
         "It requires live evidence that every prompt-length stratum uses batched native prefill before accepting the pilot."
@@ -228,13 +228,15 @@
     },
     {
       "id": "bionemo-phage-design-operate-nemo-rl-018-terminal-eod-trajectory",
-      "prompt": "One row in a batched Evo2 GDPO rollout samples A,C,EOD while another row keeps decoding. Define the shorter row's policy trajectory, loss mask, and biological QC input.",
-      "expected_output": "Retain the first EOD as a learned action while masking padding and excluding EOD and later physical samples from QC.",
+      "prompt": "One row in a batched Evo2 GDPO rollout samples A,C,EOD while another row keeps decoding. During policy replay, a small logit change ranks that sampled EOD just outside reconstructed top-k support. Define the shorter row's policy trajectory, replay distribution, loss mask, and biological QC input.",
+      "expected_output": "Retain the first EOD as a learned action and in normalized replay support while masking padding and excluding EOD and later physical samples from QC.",
       "assertions": [
         "The first EOD token and its sampled log-probability remain in the row-local policy trajectory.",
         "Tokens and log-probabilities produced physically after that row's EOD are discarded without truncating other rows.",
         "Synthetic flattening padding has zero action loss while the terminal EOD has action loss enabled.",
-        "Biological QC scores only the nucleotide text before EOD."
+        "Biological QC scores only the nucleotide text before EOD.",
+        "Filtered replay keeps sampled EOD in normalized support with a finite log-probability instead of zeroing or masking it.",
+        "Generation-versus-replay mismatch telemetry remains active."
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null

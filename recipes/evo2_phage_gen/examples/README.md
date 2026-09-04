@@ -142,7 +142,8 @@ The launcher sets `max_model_len` to the smallest 256-token boundary covering th
 prompt, its two-token `+~` prefix, and `max_new_tokens` (5,632 with the defaults), rather than
 allocating the unused remainder of the 10,240-token SFT context. Native RL trajectories retain the
 first sampled EOD and its log-probability, mask only synthetic padding, and exclude EOD and any
-post-EOD physical samples from biological QC.
+post-EOD physical samples from biological QC. Filtered policy replay also keeps each sampled action
+in a normalized target-preserving support; generation-versus-replay error telemetry remains enabled.
 
 `RL_PROMPT_BATCH_SIZE` controls the packed mixed-length decode group size (default 12); set a larger
 value only on a qualified device profile that has enough memory for the corresponding cache.
