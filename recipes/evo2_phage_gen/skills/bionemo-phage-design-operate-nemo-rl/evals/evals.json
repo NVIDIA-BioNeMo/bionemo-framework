@@ -282,6 +282,20 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-022-isolated-token-replay-tail",
+      "prompt": "A qualified BF16 Evo2 GDPO run has one selected action with generation-versus-replay absolute log-probability delta 1.88 among 503,632 active actions. Its row-level configured mismatch statistic is 1.014 against a 1.5 guard, no row is masked, all values are finite, the next-largest token delta is 0.69, mean and median remain at their established baseline, and the outlier is at position modulo 256 = 79 with no elevated page phase. Stop the run because the token delta exceeds 1.5.",
+      "expected_output": "Record and inspect the isolated token tail without confusing the sequence guard with a per-token kill switch; continue unless recurrence or distributional/boundary evidence makes it a diagnosis.",
+      "assertions": [
+        "The response does not automatically stop solely because one token exceeds the per-sequence 1.5 threshold.",
+        "It distinguishes the accepted row-level configured statistic from the per-token absolute maximum.",
+        "It checks recurrence, non-finite values, rejected rows, aggregate distribution shift, worst positions, and modulo-page concentration.",
+        "It records the outlier as an advisory and keeps a separately calibrated hard per-token guard conceptually distinct.",
+        "It still requires an immediate diagnosis for any rejected row, non-finite value, or stable boundary-localized spike."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }
