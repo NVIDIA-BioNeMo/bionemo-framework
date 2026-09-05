@@ -409,6 +409,42 @@ def test_dry_run(tmp_path: Path) -> None:
     assert conversion[conversion.index("--model-size") + 1] == "evo2_7b_base"
 
 
+def test_default_cpu_capacity_ignores_openmp_process_limit(tmp_path: Path) -> None:
+    """OpenMP tool limits must not silently reduce the Ray scheduler's CPU capacity."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    nproc = fake_bin / "nproc"
+    nproc.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ -n \"${OMP_NUM_THREADS:-}\" || -n \"${OMP_THREAD_LIMIT:-}\" ]]; then\n"
+        "  printf '32\\n'\n"
+        "else\n"
+        "  printf '160\\n'\n"
+        "fi\n"
+    )
+    nproc.chmod(0o755)
+    result_root = tmp_path / "result"
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"NUM_CPUS", "NEMO_RL_RAY_NUM_CPUS", "OMP_THREAD_LIMIT"}
+    }
+    env.update({"PATH": f"{fake_bin}:{env['PATH']}", "OMP_NUM_THREADS": "32"})
+
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((result_root / "settings.json").read_text())["cpu_count"] == 160
+
+
 def test_hopper_fp8_inference_is_forwarded_only_to_endpoint_workflows(tmp_path: Path) -> None:
     result_root = tmp_path / "hopper-fp8"
     completed = subprocess.run(

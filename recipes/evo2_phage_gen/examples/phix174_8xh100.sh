@@ -26,7 +26,8 @@ WANDB_SFT_PROJECT_NAME='evo2-phage-design-sft'
 WANDB_RL_PROJECT_NAME='evo2-phage-design-gdpo'
 WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT:-300}"
 NUM_GPUS="${NUM_GPUS:-8}"
-NUM_CPUS="${NUM_CPUS:-${NEMO_RL_RAY_NUM_CPUS:-$(nproc)}}"
+# Tool-specific OpenMP limits must not reduce the CPU capacity advertised to Ray.
+NUM_CPUS="${NUM_CPUS:-${NEMO_RL_RAY_NUM_CPUS:-$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc)}}"
 for resource_name in NUM_GPUS NUM_CPUS; do
   resource_value="${!resource_name}"
   if [[ ! "${resource_value}" =~ ^[1-9][0-9]*$ ]]; then
