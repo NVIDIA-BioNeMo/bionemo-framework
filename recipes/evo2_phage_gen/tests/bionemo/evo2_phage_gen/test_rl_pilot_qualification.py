@@ -88,6 +88,28 @@ def test_validates_full_state_checkpoint_reload_and_observed_cache_release(tmp_p
     }
 
 
+def test_accepts_rich_wrapped_checkpoint_path_in_reload_log(tmp_path: Path) -> None:
+    root = tmp_path / "checkpoints"
+    checkpoint = _write_checkpoint(root)
+    runner_log, reload_log = _write_logs(tmp_path, checkpoint)
+    weights = str(checkpoint / "policy/weights/iter_0000000")
+    split = len(weights) // 2
+    reload_log.write_text(
+        "\x1b[36m(MegatronPolicyWorker pid=7)\x1b[0m successfully loaded checkpoint from\n"
+        f"{weights[:split]}\n{weights[split:]} [ t 0/1, p 0/1 ] at iteration 0\n"
+    )
+
+    summary = validate_rl_pilot(
+        checkpoint_root=root,
+        expected_step=3,
+        runner_log=runner_log,
+        reload_log=reload_log,
+    )
+
+    assert summary["optimizer_state_saved"] is True
+    assert summary["optimizer_reinitialized"] is False
+
+
 def test_validates_explicit_model_only_fallback(tmp_path: Path) -> None:
     root = tmp_path / "checkpoints"
     checkpoint = _write_checkpoint(root, save_optimizer=False)

@@ -37,6 +37,12 @@ _WORKER_CACHE_MEMORY_PATTERN = re.compile(
     r"alloc=(?P<allocated>\d+)MiB"
 )
 _TRAINING_STEP_PATTERN = re.compile(r"={5,}\s+Step\s+\d+/\d+\s+={5,}")
+_ANSI_CSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _compact_console_text(value: str) -> str:
+    """Remove Rich styling and wrapping that may split long checkpoint paths."""
+    return re.sub(r"\s+", "", _ANSI_CSI_PATTERN.sub("", value))
 
 
 def _load_mapping(path: Path, *, description: str) -> dict[str, Any]:
@@ -129,18 +135,19 @@ def validate_rl_pilot(
     if not reload_log.is_file():
         raise ValueError(f"missing pilot reload log: {reload_log}")
     reload_text = reload_log.read_text(errors="replace")
-    fresh_optimizer = "Optimizer will be freshly initialized." in reload_text
+    compact_reload_text = _compact_console_text(reload_text)
+    fresh_optimizer = _compact_console_text("Optimizer will be freshly initialized.") in compact_reload_text
     if save_optimizer:
         if fresh_optimizer:
             raise ValueError("full-state reload discarded the saved optimizer state")
     else:
-        if f"Optimizer state not found at {optimizer}" not in reload_text:
+        if _compact_console_text(f"Optimizer state not found at {optimizer}") not in compact_reload_text:
             raise ValueError("reload did not resolve the expected model-only checkpoint")
         if not fresh_optimizer:
             raise ValueError("reload did not report fresh optimizer initialization")
-    if f"successfully loaded checkpoint from {weights}" not in reload_text:
+    if _compact_console_text(f"successfully loaded checkpoint from {weights}") not in compact_reload_text:
         raise ValueError("reload did not report loading the expected policy weights")
-    if "Dataset swap detected" in reload_text:
+    if _compact_console_text("Dataset swap detected") in compact_reload_text:
         raise ValueError("reload rejected the saved dataloader state as a dataset swap")
     if _TRAINING_STEP_PATTERN.search(reload_text) or "Training Results:" in reload_text:
         raise ValueError("reload process restarted training instead of restoring the completed step")
