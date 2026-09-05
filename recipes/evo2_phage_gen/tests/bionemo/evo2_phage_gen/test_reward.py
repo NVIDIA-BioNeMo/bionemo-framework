@@ -1296,6 +1296,7 @@ def test_external_qc_env_prepends_run_specific_tool_directory(tmp_path):
     env = _external_qc_env(ExternalQCRewardConfig(tool_bin_dir=tool_bin_dir))
 
     assert env["PATH"].split(os.pathsep)[0] == str(tool_bin_dir.resolve())
+    assert env["LOVIS4U_MMSEQS_BINARY"] == str((tool_bin_dir / "mmseqs").resolve())
 
 
 def test_smooth_reference_search_is_permissive_but_significance_bounded(tmp_path):

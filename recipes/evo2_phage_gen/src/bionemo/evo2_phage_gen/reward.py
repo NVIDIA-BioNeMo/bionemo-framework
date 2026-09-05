@@ -359,6 +359,7 @@ def _external_qc_env(external_qc: ExternalQCRewardConfig) -> dict[str, str]:
     if external_qc.tool_bin_dir is not None:
         tool_bin_dir = _recipe_path(external_qc.tool_bin_dir).resolve()
         env["PATH"] = os.pathsep.join((str(tool_bin_dir), env.get("PATH", "")))
+        env["LOVIS4U_MMSEQS_BINARY"] = str((tool_bin_dir / "mmseqs").resolve())
     return env
 
 
