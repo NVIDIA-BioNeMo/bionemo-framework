@@ -2277,8 +2277,10 @@ def add_external_qc_rewards(
             )
             _record_elapsed(timings, "reward/external_qc/parse_required_genes_s", phase_start)
     finally:
+        phase_start = time.perf_counter()
         if not external_qc.keep_artifacts and not external_qc_failed:
             shutil.rmtree(run_dir, ignore_errors=True)
+        _record_elapsed(timings, "reward/external_qc/cleanup_s", phase_start)
     return finish_timing(df)
 
 

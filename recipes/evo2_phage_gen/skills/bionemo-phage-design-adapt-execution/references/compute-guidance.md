@@ -17,4 +17,6 @@ For large multi-tool FASTA screens, separately size scheduler CPU capacity, reco
 
 For batch-local clustering, run independent prompt groups concurrently when measured useful, while budgeting prompt-group jobs times each clustering subprocess's threads against the same CPU ceiling.
 
+Put discardable metadata-heavy working trees on measured node-local scratch when shared-filesystem cleanup is material; keep logs, checkpoints, required failure evidence, and final outputs on durable storage.
+
 External detectors often alternate short parallel searches with serial setup and result handling, so their thread setting is a ceiling rather than expected constant utilization. When memory permits, make each safety batch large enough to amortize tool/database startup and cover at least one RL generation batch; use the scanner's per-phase timings to tune this on the current node.

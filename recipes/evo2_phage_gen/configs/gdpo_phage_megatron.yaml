@@ -26,10 +26,11 @@ grpo:
   # at 16 prompts/update, so 500 epochs permits 3,000 updates and cannot truncate the 500-step run.
   max_num_epochs: 500
   # Sixteen prompt records cover two examples from each anchor-by-length stratum.
-  # Sixteen generations per prompt make a 256-rollout global update; on DP8 each
-  # H100 receives one packed 32-request generation wave.
+  # Forty-eight generations per prompt make a 768-rollout global update; on DP8 each
+  # H100 receives one packed 96-request generation wave. This is the largest tested
+  # one-wave point below the 1,024-rollout recurrent-state capacity limit on 8xH100.
   num_prompts_per_step: 16
-  num_generations_per_prompt: 16
+  num_generations_per_prompt: 48
   max_num_steps: 500
   val_period: 10
   val_batch_size: 96
@@ -56,14 +57,14 @@ loss_fn:
 
 policy:
   max_total_sequence_length: 5632
-  train_global_batch_size: 256
+  train_global_batch_size: 768
   # Conservative, unqualified 8xH100 pilot starting point. At TP1 its Evo2 7B local GLU span is
   # 8 * 5632 * 11008 = 495,976,448 elements. A single GB300 qualified offload-cache MBS32 through
   # two optimizer-resident cycles, but that does not establish per-device H100 capacity. The H100
   # train -> validation -> train pilot must still set this default empirically. TP2 halves local
   # FFN width; DP does not.
   train_micro_batch_size: 8
-  generation_batch_size: 256
+  generation_batch_size: 768
   logprob_batch_size: 1
   megatron_cfg:
     tensor_model_parallel_size: 1
@@ -78,8 +79,8 @@ policy:
     top_p: 0.999
     top_k: 5
     mcore_generation_config:
-      max_requests: 32
-      prompt_batch_size: 32
+      max_requests: 96
+      prompt_batch_size: 96
       # Free the native paged-KV and packed Hyena state before policy training. Restoring these
       # buffers changes their addresses, so the adapter recaptures and verifies decode graphs.
       kv_cache_management_mode: "offload"

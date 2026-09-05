@@ -23,6 +23,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tarfile
 import urllib.request
 from pathlib import Path
 
@@ -148,6 +149,7 @@ def test_dry_run(tmp_path: Path) -> None:
             "API_KEY": "do-not-record",
             "NVIDIA_API_KEY": "also-do-not-record",
             "NEMO_RL_RAY_NUM_CPUS": "96",
+            "TMPDIR": str(tmp_path / "node-local"),
         },
         check=False,
         capture_output=True,
@@ -387,10 +389,29 @@ def test_dry_run(tmp_path: Path) -> None:
     assert "policy.generation.top_k=5" in gdpo
     assert "policy.generation.top_p=0.999" in gdpo
     assert "policy.generation.mcore_generation_config.max_model_len=5632" in gdpo
-    assert "policy.generation.mcore_generation_config.max_requests=32" in gdpo
-    assert "policy.generation.mcore_generation_config.prompt_batch_size=32" in gdpo
+    assert "policy.generation.mcore_generation_config.max_requests=96" in gdpo
+    assert "policy.generation.mcore_generation_config.prompt_batch_size=96" in gdpo
     assert "policy.generation.mcore_generation_config.kv_cache_management_mode=offload" in gdpo
-    assert "RL policy train microbatch: 8; native packed mixed-length decode group size: 32" in log
+    assert "env.phage_qc.external_qc.lovis4u_parallel_jobs=64" in gdpo
+    assert "env.phage_qc.external_qc.lovis4u_mmseqs_threads=2" in gdpo
+    assert "env.phage_qc.mmseqs_cluster_diversity.parallel_jobs=16" in gdpo
+    assert "env.phage_qc.mmseqs_cluster_diversity.threads=8" in gdpo
+    assert (
+        "env.phage_qc.external_qc.work_dir="
+        + str(tmp_path / "node-local/evo2-phage-gen/result-7b-base/external-qc/pilot")
+        in pilot
+    )
+    assert (
+        "env.phage_qc.external_qc.work_dir="
+        + str(tmp_path / "node-local/evo2-phage-gen/result-7b-base/external-qc/pilot-reload")
+        in reload
+    )
+    assert (
+        "env.phage_qc.external_qc.work_dir="
+        + str(tmp_path / "node-local/evo2-phage-gen/result-7b-base/external-qc/full")
+        in full
+    )
+    assert "RL policy train microbatch: 8; native packed mixed-length decode group size: 96" in log
 
     rollout_commands = [
         shlex.split(line.partition("command: ")[2])
@@ -410,7 +431,7 @@ def test_dry_run(tmp_path: Path) -> None:
 
 
 def test_default_cpu_capacity_ignores_openmp_process_limit(tmp_path: Path) -> None:
-    """OpenMP tool limits must not silently reduce the Ray scheduler's CPU capacity."""
+    """Tool limits do not shrink capacity, while the H100 default reserves host headroom."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     nproc = fake_bin / "nproc"
@@ -419,7 +440,7 @@ def test_default_cpu_capacity_ignores_openmp_process_limit(tmp_path: Path) -> No
         "if [[ -n \"${OMP_NUM_THREADS:-}\" || -n \"${OMP_THREAD_LIMIT:-}\" ]]; then\n"
         "  printf '32\\n'\n"
         "else\n"
-        "  printf '160\\n'\n"
+        "  printf '224\\n'\n"
         "fi\n"
     )
     nproc.chmod(0o755)
@@ -442,7 +463,7 @@ def test_default_cpu_capacity_ignores_openmp_process_limit(tmp_path: Path) -> No
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert json.loads((result_root / "settings.json").read_text())["cpu_count"] == 160
+    assert json.loads((result_root / "settings.json").read_text())["cpu_count"] == 150
 
 
 def test_hopper_fp8_inference_is_forwarded_only_to_endpoint_workflows(tmp_path: Path) -> None:
@@ -929,6 +950,10 @@ def test_failure_footer_reports_stage_progress(tmp_path: Path) -> None:
     selection = result_root / "calibration/sampling-selection.yaml"
     selection.parent.mkdir(parents=True)
     selection.write_text("temperature: 0.9\n")
+    external_qc_scratch = tmp_path / "external-qc-scratch"
+    failed_batch = external_qc_scratch / "full/batch_failed"
+    failed_batch.mkdir(parents=True)
+    (failed_batch / "pipeline.log").write_text("failed evidence\n")
 
     completed = subprocess.run(
         [
@@ -941,6 +966,7 @@ def test_failure_footer_reports_stage_progress(tmp_path: Path) -> None:
             str(result_root),
         ],
         cwd=RECIPE_ROOT,
+        env={**os.environ, "RL_EXTERNAL_QC_WORK_ROOT": str(external_qc_scratch)},
         check=False,
         capture_output=True,
         text=True,
@@ -954,6 +980,12 @@ def test_failure_footer_reports_stage_progress(tmp_path: Path) -> None:
     )
     assert expected in completed.stderr
     assert expected in (result_root / "RUNLOG.md").read_text()
+    failure_archives = list((result_root / "failure-artifacts").glob("external-qc-stage-30-*.tar"))
+    assert len(failure_archives) == 1
+    with tarfile.open(failure_archives[0]) as archive:
+        retained_log = archive.extractfile("./full/batch_failed/pipeline.log")
+        assert retained_log is not None
+        assert retained_log.read() == b"failed evidence\n"
 
 
 def test_existing_sampling_selection_is_reused(tmp_path: Path) -> None:

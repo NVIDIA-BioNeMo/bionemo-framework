@@ -1754,7 +1754,7 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
             config_path=config_path,
             pipeline_script=pipeline_script,
             work_dir=tmp_path / "work",
-            keep_artifacts=True,
+            keep_artifacts=False,
             enable_synteny=True,
             synteny_mode="full",
             enable_average_protein_identity=True,
@@ -1786,6 +1786,8 @@ def test_score_nucleotide_metrics_can_fold_in_external_qc_rewards(tmp_path, monk
     assert scored["phrogs_hit_fraction"].tolist() == [2 / 3, 1.0]
     assert scored["average_protein_identity_measurement_available"].tolist() == [1.0, 1.0]
     assert scored["required_genes_measurement_available"].tolist() == [1.0, 1.0]
+    assert scored["timing/phage_qc/reward/external_qc/cleanup_s"].ge(0.0).all()
+    assert not any((tmp_path / "work").glob("batch_*"))
 
 
 def test_external_qc_subprocess_failure_zeros_external_rewards(tmp_path, monkeypatch):

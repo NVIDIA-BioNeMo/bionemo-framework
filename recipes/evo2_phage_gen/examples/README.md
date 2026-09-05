@@ -137,11 +137,14 @@ an unseeded route into the A/A*/B cluster; `origin` retains the canonical contex
 short origin-spanning segment shared by those three ORFs. This rotation strategy does not apply to
 a linear genome, whose biological endpoints must be preserved.
 
-Each 256-rollout GDPO update uses 16 prompt records × 16 generations. With DP8, each 32-request
+Each 768-rollout GDPO update uses 16 prompt records × 48 generations. With DP8, each 96-request
 decode batch contains two prompt records, while the global update contains all eight anchor×length
-strata: two prompt records and 32 generated sequences per stratum. Validation remains a separate
+strata: two prompt records and 96 generated sequences per stratum. Validation remains a separate
 96-record mixture. The 1,000-design final rollout uses 125 prompts per stratum: two 500-record,
 same-length files alternate four anchors and combine to exactly 1,000 records.
+The 768-point completed one cold 8×H100 rollout, QC, replay, backward, and optimizer update with no
+replay masks; 1,024 failed recurrent-state allocation before decode, so it is not a supported
+one-wave setting. The standard multi-update pilot remains the steady-state qualification.
 Legacy synchronous GRPO is bounded by both steps and epochs; this 96-row bank supplies six updates
 per epoch, so the configured 500 epochs safely exceeds the requested 500-step ceiling.
 
@@ -152,7 +155,7 @@ first sampled EOD and its log-probability, mask only synthetic padding, and excl
 post-EOD physical samples from biological QC. Filtered policy replay also keeps each sampled action
 in a normalized target-preserving support; generation-versus-replay error telemetry remains enabled.
 
-The policy defaults to global batch 256, candidate training microbatch 8, validation 96, and
+The policy defaults to global batch 768, candidate training microbatch 8, validation 96, and
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. The standard pilot disables initial validation,
 trains for two updates, validates, and then completes a third update. Adam state first materializes
 during update one, and the post-validation update detects memory or graph state retained by
@@ -165,8 +168,8 @@ rejects larger resolved shapes before worker allocation. TP2 halves the local FF
 distributes the global batch, so neither replaces a full-shape memory and replay qualification on
 the deployed H100 topology. Keep `logprob_batch_size=1` as the conservative independent setting.
 
-`RL_PROMPT_BATCH_SIZE` controls the packed decode group size (default 32, the DP8-local share of the
-256-rollout global batch); set a larger value only on a qualified device profile with enough cache
+`RL_PROMPT_BATCH_SIZE` controls the packed decode group size (default 96, the DP8-local share of the
+768-rollout global batch); set a larger value only on a qualified device profile with enough cache
 capacity. The candidate MBS8 is paired with explicit cache offload in this 8×H100 launcher. The adapter
 deallocates paged-KV and Hyena state before policy training, then restores them
 and recaptures graph runners because their buffer addresses changed. Non-persistent cache settings
@@ -260,8 +263,8 @@ ordered by mean per-nucleotide likelihood under the selected SFT model. Mixed-or
 generation order because whole-sequence language-model likelihood depends on the linearized origin;
 the scores remain recorded as diagnostics.
 The final rollout and the inner GDPO rollout both use packed dynamic prefill and batched recurrent
-decode for medium/long generation. GDPO assigns 32 requests to each of eight data-parallel replicas
-for its 256-sequence step and retains sampled EOD actions so the length reward can teach termination.
+decode for medium/long generation. GDPO assigns 96 requests to each of eight data-parallel replicas
+for its 768-sequence step and retains sampled EOD actions so the length reward can teach termination.
 Final selected-SFT
 likelihood uses packed prediction for ragged batches while preserving FASTA record mappings. NeMo-RL's
 separate `policy.sequence_packing` option remains disabled until its gradient-bearing loss/backward
@@ -286,8 +289,16 @@ Raw endpoint-local DUST fractions can differ by linear origin, but the tested Ph
 the same intrinsic reward and pass outcome; the exact control excludes per-row cluster-deduplicated
 representative flags because those are set-relative rather than properties of a rotation.
 
-The reference topology is eight H100 80 GB GPUs. `NUM_GPUS` defaults to 8 and `NUM_CPUS` to
-`nproc`. SFT tensor parallelism defaults to 1 on a single GPU and 2 otherwise; override
+The reference topology is eight H100 80 GB GPUs. `NUM_GPUS` defaults to 8. The launcher detects
+CPU availability without inheriting tool-specific OpenMP limits and advertises at most 150 slots to
+Ray, leaving host headroom on the 160-CPU H100 shape; `NUM_CPUS` remains an explicit override.
+Stage-40 reward phases run sequentially: external QC uses 64 jobs × 2 MMseqs threads and grouped
+diversity uses 16 jobs × 8 threads, so each phase stays within 128 worker threads. SFT tensor
+parallelism defaults to 1 on a single GPU and 2 otherwise. The discarded, metadata-heavy external-QC
+tree defaults to node-local `${TMPDIR:-/tmp}`; set `RL_EXTERNAL_QC_WORK_ROOT` when the node's scratch
+lives elsewhere. On launcher failure, retained Arc evidence is packed under
+`failure-artifacts/` in the result root. Durable logs, checkpoints, safety results, and final
+artifacts remain under the result root. Override
 `SFT_TENSOR_PARALLEL_SIZE` only after a full-shape smoke test. Packed dynamic prefill interleaves
 the selected prompt lengths inside each deterministic GPU shard, so length-stratum count does not
 need to divide a microbatch or the GPU count. `SFT_MAX_STEPS` defaults to 12,000 as a safety ceiling;

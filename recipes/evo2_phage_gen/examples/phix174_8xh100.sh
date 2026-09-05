@@ -26,8 +26,13 @@ WANDB_SFT_PROJECT_NAME='evo2-phage-design-sft'
 WANDB_RL_PROJECT_NAME='evo2-phage-design-gdpo'
 WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT:-300}"
 NUM_GPUS="${NUM_GPUS:-8}"
-# Tool-specific OpenMP limits must not reduce the CPU capacity advertised to Ray.
-NUM_CPUS="${NUM_CPUS:-${NEMO_RL_RAY_NUM_CPUS:-$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc)}}"
+# Detect availability outside tool-specific OpenMP limits, then reserve H100 host headroom.
+AVAILABLE_CPUS="$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc)"
+DEFAULT_NUM_CPUS=150
+if ((AVAILABLE_CPUS < DEFAULT_NUM_CPUS)); then
+  DEFAULT_NUM_CPUS="${AVAILABLE_CPUS}"
+fi
+NUM_CPUS="${NUM_CPUS:-${NEMO_RL_RAY_NUM_CPUS:-${DEFAULT_NUM_CPUS}}}"
 for resource_name in NUM_GPUS NUM_CPUS; do
   resource_value="${!resource_name}"
   if [[ ! "${resource_value}" =~ ^[1-9][0-9]*$ ]]; then
@@ -61,8 +66,8 @@ PHAROKKA_DATABASE_URL="${PHAROKKA_DATABASE_URL:-https://zenodo.org/records/21755
 PHAROKKA_DATABASE_MD5="${PHAROKKA_DATABASE_MD5:-143bb375ddb0b0653e5cb5671f4a7629}"
 PHAROKKA_DATABASE_RELEASE="${PHAROKKA_DATABASE_RELEASE:-Pharokka database v1.11.0 / PHROGs v4}"
 CALIBRATION_WORKERS="${CALIBRATION_WORKERS:-8}"
-# Global rollout 256 over DP8 gives 32 local requests. This is distinct from policy training MBS.
-RL_PROMPT_BATCH_SIZE="${RL_PROMPT_BATCH_SIZE:-32}"
+# Global rollout 768 over DP8 gives 96 local requests. This is distinct from policy training MBS.
+RL_PROMPT_BATCH_SIZE="${RL_PROMPT_BATCH_SIZE:-96}"
 # MBS8 is the conservative H100 start. Offload-cache MBS32 passed two steady-state GB300 updates,
 # but that does not establish H100 capacity; TP1 MBS64 also exceeds the signed-int32 local GLU span.
 RL_TRAIN_MICRO_BATCH_SIZE="${RL_TRAIN_MICRO_BATCH_SIZE:-8}"
@@ -80,8 +85,8 @@ if [[ ! "${RL_TRAIN_MICRO_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
     "${RL_TRAIN_MICRO_BATCH_SIZE}" >&2
   exit 2
 fi
-if ((256 % (NUM_GPUS * RL_TRAIN_MICRO_BATCH_SIZE) != 0)); then
-  printf 'RL global batch 256 must be divisible by NUM_GPUS * RL_TRAIN_MICRO_BATCH_SIZE (%s * %s)\n' \
+if ((768 % (NUM_GPUS * RL_TRAIN_MICRO_BATCH_SIZE) != 0)); then
+  printf 'RL global batch 768 must be divisible by NUM_GPUS * RL_TRAIN_MICRO_BATCH_SIZE (%s * %s)\n' \
     "${NUM_GPUS}" "${RL_TRAIN_MICRO_BATCH_SIZE}" >&2
   exit 2
 fi
@@ -213,6 +218,9 @@ fi
 WANDB_RUN_STEM="$(basename -- "${RESULT_ROOT}")-${MODEL_VARIANT}"
 WANDB_SFT_RUN_NAME="${WANDB_RUN_STEM}-sft"
 WANDB_RL_RUN_NAME="${WANDB_RUN_STEM}-gdpo"
+# Successful Arc batches are metadata-heavy and discarded. Keep that transient tree off shared
+# storage; set RL_EXTERNAL_QC_WORK_ROOT explicitly when node-local scratch lives elsewhere.
+RL_EXTERNAL_QC_WORK_ROOT="${RL_EXTERNAL_QC_WORK_ROOT:-${TMPDIR:-/tmp}/evo2-phage-gen/${WANDB_RUN_STEM}/external-qc}"
 declare -a SFT_WANDB_ARGS=()
 declare -a RL_WANDB_ARGS=(logger.wandb_enabled=false)
 if [[ "${WANDB_ENABLED}" == "1" ]]; then
@@ -301,6 +309,18 @@ report_run_exit() {
   trap - EXIT
   if [[ "${status}" != 0 && "${RUN_COMPLETION_REPORTED}" != 1 ]]; then
     set +e
+    local failure_entry failure_archive failure_archive_dir
+    failure_entry="$(find "${RL_EXTERNAL_QC_WORK_ROOT}" -mindepth 1 \( -type f -o -type l \) -print -quit 2>/dev/null)"
+    if [[ -n "${failure_entry}" ]]; then
+      failure_archive_dir="${RESULT_ROOT}/failure-artifacts"
+      failure_archive="${failure_archive_dir}/external-qc-stage-${CURRENT_STAGE_ID:-preflight}-$(date -u +%Y%m%dT%H%M%SZ)-$$.tar"
+      mkdir -p "${failure_archive_dir}"
+      if tar -C "${RL_EXTERNAL_QC_WORK_ROOT}" -cf "${failure_archive}" .; then
+        note "retained external-QC failure artifacts: ${failure_archive}" >&2
+      else
+        note "WARNING: could not archive external-QC failure artifacts from ${RL_EXTERNAL_QC_WORK_ROOT}" >&2
+      fi
+    fi
     completed="$(completed_stage_count)"
     if ((CURRENT_STAGE_ORDINAL > 0)); then
       note "RUN FAILED during step ${CURRENT_STAGE_ORDINAL}/${TOTAL_STAGES} (stage ${CURRENT_STAGE_ID}: ${CURRENT_STAGE_DESCRIPTION}); ${completed}/${TOTAL_STAGES} steps complete; exit code ${status}; see ${RUNLOG}" >&2
@@ -964,7 +984,8 @@ stage_40() {
     state rl-sft-checkpoint "${rl_checkpoint}"
     note "RL will use the prepared optimizer-free, runtime-sanitized SFT checkpoint: ${rl_checkpoint}"
     export NEMO_RL_RAY_NUM_CPUS="${NUM_CPUS}"
-    note "RL Ray CPU slots: ${NEMO_RL_RAY_NUM_CPUS}; reward phases use at most 64 threads"
+    note "RL Ray CPU slots: ${NEMO_RL_RAY_NUM_CPUS}; sequential reward phases use at most 128 threads"
+    note "RL external-QC scratch: ${RL_EXTERNAL_QC_WORK_ROOT}"
     run pytest -q tests/bionemo/evo2_phage_gen/test_reward.py tests/bionemo/evo2_phage_gen/test_nemo_rl_env.py tests/bionemo/evo2_phage_gen/test_reference_controls.py
     run evo2_phage_generation write-reference-rotations --reference-fasta "${PHIX_REFERENCE_FASTA}" \
       --output-fasta "${control}/reference-rotations.fasta" "${control_anchor_args[@]}"
@@ -972,12 +993,12 @@ stage_40() {
       evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${rl_checkpoint}" \
       --prompt-data "${rl}/train.jsonl" --gpus-per-node "${NUM_GPUS}" \
       --control-fasta "${control}/reference-rotations.fasta" --control-dir "${control}"
-    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" checkpointing.save_optimizer=true policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.train_micro_batch_size="${RL_TRAIN_MICRO_BATCH_SIZE}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.max_model_len="${RL_MAX_MODEL_LEN}" policy.generation.mcore_generation_config.max_requests="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.prompt_batch_size="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.kv_cache_management_mode=offload policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
+    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" checkpointing.save_optimizer=true policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.train_micro_batch_size="${RL_TRAIN_MICRO_BATCH_SIZE}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.max_model_len="${RL_MAX_MODEL_LEN}" policy.generation.mcore_generation_config.max_requests="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.prompt_batch_size="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.kv_cache_management_mode=offload policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}" env.phage_qc.external_qc.lovis4u_parallel_jobs=64 env.phage_qc.external_qc.lovis4u_mmseqs_threads=2 env.phage_qc.mmseqs_cluster_diversity.parallel_jobs=16 env.phage_qc.mmseqs_cluster_diversity.threads=8)
     note "RL policy train microbatch: ${RL_TRAIN_MICRO_BATCH_SIZE}; native packed mixed-length decode group size: ${RL_PROMPT_BATCH_SIZE}; generation context ceiling: ${RL_MAX_MODEL_LEN}"
     if [[ -f "${STAGE_DIR}/40-pilot.done" ]]; then
       note 'substage 40-pilot already complete'
     else
-      monitored 'three-step post-validation GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" logger.wandb_enabled=false checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=3 grpo.val_at_start=false grpo.val_period=2 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
+      monitored 'three-step post-validation GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" logger.wandb_enabled=false checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=3 grpo.val_at_start=false grpo.val_period=2 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RL_EXTERNAL_QC_WORK_ROOT}/pilot" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
       [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-pilot.done"
     fi
     if [[ -f "${STAGE_DIR}/40-pilot-reload.done" ]]; then
@@ -985,7 +1006,7 @@ stage_40() {
     else
       # A successful update is not enough: exercise the exact full-state checkpoint in a fresh
       # process. max_num_steps equals the saved step, so a valid restore exits without training.
-      monitored 'full-state GDPO checkpoint reload' "${RESULT_ROOT}/rl-pilot-reload/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" logger.wandb_enabled=false checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=3 grpo.val_at_start=false grpo.val_period=2 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot-reload/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot-reload/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot-reload/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot-reload/logs"
+      monitored 'full-state GDPO checkpoint reload' "${RESULT_ROOT}/rl-pilot-reload/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" logger.wandb_enabled=false checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=3 grpo.val_at_start=false grpo.val_period=2 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RL_EXTERNAL_QC_WORK_ROOT}/pilot-reload" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot-reload/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot-reload/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot-reload/logs"
       run python -m bionemo.evo2_phage_gen.rl_pilot_qualification \
         --checkpoint-root "${RESULT_ROOT}/rl-pilot/checkpoints" --expected-step 3 \
         --runner-log "${RESULT_ROOT}/rl-pilot/runner.log" \
@@ -1000,7 +1021,7 @@ stage_40() {
       check_objectives "${RESULT_ROOT}/rl-pilot/objective-health.json"
       [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-pilot-check.done"
     fi
-    monitored "500-step DP${NUM_GPUS} GDPO" "${rl}/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" "${RL_WANDB_ARGS[@]}" checkpointing.checkpoint_dir="${rl}/checkpoints" env.phage_qc.external_qc.work_dir="${rl}/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${rl}/mmseqs" env.phage_qc.sequence_safety.work_dir="${rl}/safety" logger.log_dir="${rl}/logs"
+    monitored "500-step DP${NUM_GPUS} GDPO" "${rl}/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" "${RL_WANDB_ARGS[@]}" checkpointing.checkpoint_dir="${rl}/checkpoints" env.phage_qc.external_qc.work_dir="${RL_EXTERNAL_QC_WORK_ROOT}/full" env.phage_qc.mmseqs_cluster_diversity.work_dir="${rl}/mmseqs" env.phage_qc.sequence_safety.work_dir="${rl}/safety" logger.log_dir="${rl}/logs"
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-rl.done"
   fi
   run evo2_phage_monitor_objectives --tensorboard-root "${rl}/logs" --config configs/gdpo_phage_megatron.yaml --output "${rl}/objective-health.json" --history-output "${rl}/objective-history.json"
