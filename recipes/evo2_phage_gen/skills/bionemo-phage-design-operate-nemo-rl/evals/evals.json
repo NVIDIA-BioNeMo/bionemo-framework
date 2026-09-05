@@ -365,6 +365,20 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-028-invalid-sampled-candidate",
+      "prompt": "A 256-row GDPO rollout has one short assistant completion ending in NNN followed by a correctly retained EOD. The validity reward is zero for that row. All selected generation and replay log-probabilities are finite, no sequence crosses the mismatch guard, loss masks and action spans agree, and there is no paged-KV phase elevation. Stop the run for an invalid assistant sequence.",
+      "expected_output": "Record the malformed candidate as a legitimate negative RL trajectory and continue while preserving correctness monitoring.",
+      "assertions": [
+        "The response does not classify one faithfully sampled non-ACGT candidate as rollout corruption or automatically stop the run.",
+        "It preserves the N tokens, terminal EOD, sampled log-probabilities, and action loss mask rather than sanitizing the trajectory.",
+        "It verifies explicit zero validity credit and keeps the invalid-character incidence visible as biological reward support.",
+        "It distinguishes candidate quality from rejected replay rows, non-finite values, mask or action-span errors, boundary-localized mismatch, and scorer execution failure.",
+        "It would diagnose tokenizer or serialization corruption, uninterpretable reward execution, or a sustained malformed-output collapse rather than ignoring those conditions."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }
