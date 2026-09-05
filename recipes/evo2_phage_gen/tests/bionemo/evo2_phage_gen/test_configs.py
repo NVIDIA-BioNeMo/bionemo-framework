@@ -242,7 +242,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["grpo"]["val_at_end"] is True
     assert config["policy"]["max_total_sequence_length"] == 5632
     assert config["policy"]["train_global_batch_size"] == 256
-    assert config["policy"]["train_micro_batch_size"] == 32
+    assert config["policy"]["train_micro_batch_size"] == 8
     assert config["policy"]["generation_batch_size"] == 256
     assert config["policy"]["logprob_batch_size"] == 1
     assert config["policy"]["generation"]["max_new_tokens"] + 16 == 5436

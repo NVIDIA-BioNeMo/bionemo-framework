@@ -148,18 +148,19 @@ first sampled EOD and its log-probability, mask only synthetic padding, and excl
 post-EOD physical samples from biological QC. Filtered policy replay also keeps each sampled action
 in a normalized target-preserving support; generation-versus-replay error telemetry remains enabled.
 
-The policy defaults to global batch 256, training microbatch 32, validation 96, and
+The policy defaults to global batch 256, candidate training microbatch 8, validation 96, and
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. The standard pilot runs two optimizer updates:
 Adam state first materializes during update one, so a one-update pass does not establish
-steady-state capacity. For Evo2 7B at TP1, the largest local GLU output
-is `32 × 5,632 × 11,008 = 1,983,905,792` elements, just below signed-int32 indexing; the launcher
+steady-state capacity. MBS8 is a conservative, unqualified starting point for the 8×H100 pilot,
+not a measured steady-state maximum. For Evo2 7B at TP1, its largest local GLU output
+is `8 × 5,632 × 11,008 = 495,976,448` elements, below signed-int32 indexing; the launcher
 rejects larger resolved shapes before worker allocation. TP2 halves the local FFN width and DP only
 distributes the global batch, so neither replaces a full-shape memory and replay qualification on
 the deployed H100 topology. Keep `logprob_batch_size=1` as the conservative independent setting.
 
 `RL_PROMPT_BATCH_SIZE` controls the packed decode group size (default 32, the DP8-local share of the
 256-rollout global batch); set a larger value only on a qualified device profile with enough cache
-capacity. MBS32 is paired with explicit cache offload in this 8×H100 launcher. The adapter
+capacity. The candidate MBS8 is paired with explicit cache offload in this 8×H100 launcher. The adapter
 deallocates paged-KV and Hyena state before policy training, then restores them
 and recaptures graph runners because their buffer addresses changed. Non-persistent cache settings
 must reach MCore's `InferenceConfig`, and a release that leaves tensor state allocated fails rather

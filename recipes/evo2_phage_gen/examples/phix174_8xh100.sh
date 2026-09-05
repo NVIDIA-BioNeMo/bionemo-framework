@@ -623,8 +623,8 @@ if [[ "${DRY_RUN}" != "1" ]]; then
   export PATH="${RECIPE_ROOT}/data/external/bin:${PATH}"
   export CUDA_DEVICE_MAX_CONNECTIONS=1
   # Expandable segments mitigate fragmentation, not steady-state capacity. The stage-40 pilot
-  # crosses two updates because Adam materializes after the first; MBS32 also relies on releasing
-  # the non-persistent native cache before policy training.
+  # crosses two updates because Adam materializes after the first; the candidate policy
+  # microbatch also relies on releasing the non-persistent native cache before training.
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   export NCCL_GRAPH_REGISTER=0
   if ! gpu_info="$(nvidia-smi --query-gpu=name --format=csv,noheader)"; then

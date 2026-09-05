@@ -50,9 +50,10 @@ loss_fn:
 policy:
   max_total_sequence_length: 5632
   train_global_batch_size: 256
-  # Evo2 7B has local GLU span 32 * 5632 * 11008 = 1,983,905,792 elements at TP1,
-  # just below signed-int32 kernel indexing. TP2 halves local FFN width; DP does not.
-  train_micro_batch_size: 32
+  # Conservative, unqualified 8xH100 pilot starting point. At TP1 its Evo2 7B local GLU span is
+  # 8 * 5632 * 11008 = 495,976,448 elements. The two-update pilot must still establish capacity.
+  # TP2 halves local FFN width; DP does not.
+  train_micro_batch_size: 8
   generation_batch_size: 256
   logprob_batch_size: 1
   megatron_cfg:
