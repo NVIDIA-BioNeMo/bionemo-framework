@@ -168,13 +168,16 @@ and recaptures graph runners because their buffer addresses changed. Non-persist
 must reach MCore's `InferenceConfig`, and a release that leaves tensor state allocated fails rather
 than proceeding toward a later OOM. Persist-cache deployments need lifecycle-aware capacity
 qualification. Initial validation left about 12.55 GiB more allocated (152.25 versus 139.70 GiB)
-in the measured single-GB300 trials, so the earlier MBS32, MBS16, and MBS8 failures did not
-establish a pure MBS ceiling. Follow-up MBS32 and MBS16 trials without initial validation also
-OOMed after clean rollouts, but about 29 GiB remained allocated device-wide after exit with no
-compute process, held through host display and persistence handles. These describe a contaminated
-operating node, not portable MBS red/green classifications; MBS8 has not been retested under the
-corrected conditions. Do not transfer any of those values to H100. Start with training, reach
-optimizer steady state, run a scheduled validation, and then complete a subsequent update.
+in early single-GB300 trials, and roughly 29.9 GiB of device-wide framebuffer use made their
+capacity failures inconclusive. A corrected `val_at_start=false`, offload-cache run at MBS32 then
+completed two full optimizer-resident rollout/update cycles despite that external baseline. On
+cycle two, `finish_generation` reduced PyTorch allocation from 202,501 to 75,431 MiB and device use
+from 243,653 to 114,613 MiB; replay over 921,250 active tokens had no masks, nonfinite values,
+large deltas, or page-phase elevation. This qualifies MBS32 only for that measured GB300 profile
+and directly validates native cache release; persist-cache MBS32 remains unproven. MBS64 exceeds
+the TP1 signed-int32 GLU limit, making MBS32 the largest robust candidate on that path. Do not
+transfer it to H100: start with training, reach optimizer steady state, run a scheduled validation,
+and then complete a subsequent update on the deployed topology.
 Expandable segments fix fragmentation, not retained-state capacity.
 Optimizer state is offloaded during generation by default. On a device with measured HBM capacity,
 `policy.generation.mcore_generation_config.generation_adapter_config.preserve_optimizer_state_during_generation=true`

@@ -51,8 +51,10 @@ policy:
   max_total_sequence_length: 5632
   train_global_batch_size: 256
   # Conservative, unqualified 8xH100 pilot starting point. At TP1 its Evo2 7B local GLU span is
-  # 8 * 5632 * 11008 = 495,976,448 elements. The two-update pilot must still establish capacity.
-  # TP2 halves local FFN width; DP does not.
+  # 8 * 5632 * 11008 = 495,976,448 elements. A single GB300 qualified offload-cache MBS32 through
+  # two optimizer-resident cycles, but that does not establish per-device H100 capacity. The H100
+  # train -> validation -> train pilot must still set this default empirically. TP2 halves local
+  # FFN width; DP does not.
   train_micro_batch_size: 8
   generation_batch_size: 256
   logprob_batch_size: 1
