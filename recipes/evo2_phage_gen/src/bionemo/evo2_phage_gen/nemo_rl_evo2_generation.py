@@ -25,6 +25,8 @@ from typing import Any
 
 import torch
 
+from bionemo.evo2.models.megatron.hyena.subquadratic_safety import ensure_subquadratic_ops_supported
+
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +253,10 @@ def generate_evo2_native_batched(
     native_dynamic = getattr(worker, "_evo2_native_dynamic_components", None)
     if native_dynamic is None:
         raw_model = _unwrap_evo2_model(unwrap_model(worker.model))
+        if bool(getattr(getattr(raw_model, "config", None), "use_subquadratic_ops", False)):
+            # Dynamic rollout does not use these kernels, but the same colocated model does during
+            # the policy update. Reject an incompatible runtime before paying for a full rollout.
+            ensure_subquadratic_ops_supported()
         _prepare_evo2_quantized_inference(raw_model)
         cuda_graph_impl = str(mcore_generation_config.get("cuda_graph_impl", "local"))
         requested_cuda_graph_scope = str(mcore_generation_config.get("inference_cuda_graph_scope", "block"))

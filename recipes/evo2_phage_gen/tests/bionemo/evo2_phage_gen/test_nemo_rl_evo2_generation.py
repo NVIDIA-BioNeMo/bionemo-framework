@@ -1024,11 +1024,14 @@ def test_evo2_adapter_forwards_generation_controls(monkeypatch):
         (None, "nvfp4", "layer"),
     ],
 )
-def test_adapter_resolves_quantized_graph_scope_before_setup(monkeypatch, fp8, fp4, expected_scope):
+def test_adapter_preflights_training_kernels_and_resolves_quantized_graph_scope_before_setup(
+    monkeypatch, fp8, fp4, expected_scope
+):
     prompt_tokens = torch.tensor([[11, 12], [21, 22]])
     prompt_lengths = torch.tensor([2, 2])
     sampling_params = [SimpleNamespace(num_tokens_to_generate=2, top_k=5, top_p=0.999)] * 2
     setup_kwargs = {}
+    preflight_calls = []
     native_dynamic = SimpleNamespace(
         forward_model=object(),
         evo2_seed=0,
@@ -1048,7 +1051,7 @@ def test_adapter_resolves_quantized_graph_scope_before_setup(monkeypatch, fp8, f
             }
         },
         model=SimpleNamespace(
-            config=SimpleNamespace(fp8=fp8, fp4=fp4),
+            config=SimpleNamespace(fp8=fp8, fp4=fp4, use_subquadratic_ops=True),
             decoder=SimpleNamespace(hyena_state_shapes_per_request=lambda: None),
         ),
         megatron_tokenizer=_Tokenizer(),
@@ -1075,8 +1078,14 @@ def test_adapter_resolves_quantized_graph_scope_before_setup(monkeypatch, fp8, f
         ],
     )
 
+    monkeypatch.setattr(
+        evo2_generation,
+        "ensure_subquadratic_ops_supported",
+        lambda: preflight_calls.append(True),
+    )
     evo2_generation.generate_evo2_native_batched(worker, prompt_tokens, prompt_lengths, sampling_params)
 
+    assert preflight_calls == [True]
     assert setup_kwargs["cuda_graphs_enabled"] is True
     assert setup_kwargs["cuda_graph_scope"] == expected_scope
     assert setup_kwargs["kv_cache_management_mode"] == "offload"
