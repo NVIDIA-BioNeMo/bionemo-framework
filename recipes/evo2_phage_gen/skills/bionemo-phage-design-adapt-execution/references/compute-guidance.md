@@ -15,4 +15,6 @@ Use an accelerator for an external filter only when the actual tool/database sup
 
 For large multi-tool FASTA screens, separately size record or batch workers and each tool's internal threads. Include outer workers, nested subprocess counts, and tool threads in the concurrency budget, and set nested limits explicitly because tool defaults may claim all visible CPUs. Use bounded batches and parallelize serial preparation such as ORF calling when measured throughput improves, but cap the largest simultaneously active worker-times-thread combination to leave headroom. Apply the same accounting to RL environment actors; do not multiply per-batch settings by GPU ranks when a single environment actor performs scoring.
 
+For batch-local clustering, run independent prompt groups concurrently when measured useful, while budgeting prompt-group jobs times each clustering subprocess's threads against the same CPU ceiling.
+
 External detectors often alternate short parallel searches with serial setup and result handling, so their thread setting is a ceiling rather than expected constant utilization. When memory permits, make each safety batch large enough to amortize tool/database startup and cover at least one RL generation batch; use the scanner's per-phase timings to tune this on the current node.

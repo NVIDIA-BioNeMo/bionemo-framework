@@ -52,7 +52,7 @@
         "The response does not generalize one filter's threading result to every tool or stage.",
         "It benchmarks realistic records and measures throughput, memory, I/O, and contention for each important path.",
         "It checks that optimized and reference paths agree on controls and record mapping.",
-        "It selects concurrency from the shared bottleneck and leaves enough resources for monitoring and checkpointing.",
+        "It selects concurrency from the shared bottleneck, budgets independent record or prompt-group jobs times per-tool threads, and leaves enough resources for monitoring and checkpointing.",
         "Missing or failed required filters remain visible and cannot become PASS."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",

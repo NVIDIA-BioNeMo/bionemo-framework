@@ -931,6 +931,7 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 cov_mode=int(mmseqs_cfg.get("cov_mode", 0)),
                 seq_id_mode=int(mmseqs_cfg.get("seq_id_mode", 0)),
                 cluster_mode=int(mmseqs_cfg.get("cluster_mode", 0)),
+                parallel_jobs=int(mmseqs_cfg.get("parallel_jobs", 1)),
                 threads=mmseqs_cfg.get("threads"),
                 verbosity=int(mmseqs_cfg.get("verbosity", 0)),
             )

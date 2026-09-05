@@ -26,6 +26,7 @@ import sys
 import time
 import uuid
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
@@ -266,6 +267,7 @@ class MMseqsClusterDiversityConfig:
     cov_mode: int = 0
     seq_id_mode: int = 0
     cluster_mode: int = 0
+    parallel_jobs: int = 1
     threads: int | None = None
     verbosity: int = 0
 
@@ -543,15 +545,24 @@ def add_mmseqs_cluster_diversity_rewards(
         prompt_groups = (
             valid_df["prompt_group"] if "prompt_group" in valid_df else pd.Series("__all__", index=valid_df.index)
         )
+        grouped = list(enumerate(valid_df.groupby(prompt_groups, sort=False)))
+        max_workers = min(max(1, int(mmseqs_config.parallel_jobs)), len(grouped))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(
+                    _cluster_valid_sequence_group,
+                    group_df,
+                    run_dir,
+                    group_index,
+                    mmseqs_config,
+                )
+                for group_index, (_prompt_group, group_df) in grouped
+            ]
+
         total_clusters = 0
         total_missing = 0
-        for group_index, (_prompt_group, group_df) in enumerate(valid_df.groupby(prompt_groups, sort=False)):
-            rewards_by_row, num_clusters, num_missing = _cluster_valid_sequence_group(
-                group_df,
-                run_dir,
-                group_index,
-                mmseqs_config,
-            )
+        for future in futures:
+            rewards_by_row, num_clusters, num_missing = future.result()
             total_clusters += num_clusters
             total_missing += num_missing
             for row_index, (cluster_id, cluster_size, reward) in rewards_by_row.items():

@@ -20,6 +20,7 @@ import os
 import random
 import subprocess
 import sys
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -1086,6 +1087,46 @@ def test_mmseqs_cluster_diversity_is_prompt_group_local(tmp_path, monkeypatch):
     assert scored["mmseqs_cluster_size"].tolist() == [2, 2, 1, 1]
     assert scored["mmseqs_cluster_num_clusters"].tolist() == [3, 3, 3, 3]
     assert scored["mmseqs_cluster_num_missing_from_output"].tolist() == [0, 0, 0, 0]
+
+
+def test_mmseqs_cluster_diversity_runs_independent_prompt_groups_concurrently(tmp_path, monkeypatch):
+    """Removing prompt-group concurrency would serialize independent MMseqs jobs."""
+    concurrent_calls = threading.Barrier(2)
+
+    def fake_run(args, check):
+        assert check is True
+        concurrent_calls.wait(timeout=1)
+        result_prefix = Path(args[3])
+        Path(f"{result_prefix}_cluster.tsv").write_text("seq_0\tseq_0\nseq_1\tseq_1\n")
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    df = pd.DataFrame(
+        {
+            "id_prompt": ["a0", "a1", "b0", "b1"],
+            "prompt_group": ["prompt-a", "prompt-a", "prompt-b", "prompt-b"],
+            "sequence": ["ACGT" * 1000, "TGCA" * 1000, "GTAC" * 1000, "CAGT" * 1000],
+        }
+    )
+    mmseqs_config = MMseqsClusterDiversityConfig(
+        enabled=True,
+        mmseqs_bin="fake-mmseqs",
+        work_dir=tmp_path,
+        parallel_jobs=2,
+    )
+
+    scored = score_nucleotide_metrics(
+        df,
+        weights=RewardWeights(
+            valid_nt_chars=0.0,
+            genome_length=0.0,
+            gc_content=0.0,
+            nt_homopolymer=0.0,
+            mmseqs_cluster_diversity=1.0,
+        ),
+        mmseqs_cluster_diversity=mmseqs_config,
+    )
+
+    assert scored["reward_mmseqs_cluster_diversity"].tolist() == [1.0, 1.0, 1.0, 1.0]
 
 
 def test_threshold_reward_helpers_plateau_at_pass_criteria():

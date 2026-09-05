@@ -235,6 +235,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
         "cov_mode": 0,
         "seq_id_mode": 0,
         "cluster_mode": 0,
+        "parallel_jobs": 1,
         "threads": 64,
         "verbosity": 0,
     }
