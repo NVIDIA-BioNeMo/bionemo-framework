@@ -605,6 +605,59 @@ def test_nonpersistent_cache_release_fails_when_context_remains_allocated():
         evo2_generation._suspend_evo2_native_cache(native_dynamic)
 
 
+def test_nonpersistent_cache_release_records_observed_device_memory_drop(monkeypatch):
+    class _Context:
+        is_tensor_state_allocated = True
+
+        def reset(self):
+            pass
+
+        def deallocate_inference_state_buffers(self):
+            self.is_tensor_state_allocated = False
+
+    native_dynamic = SimpleNamespace(
+        shared_dyn_ctx=_Context(),
+        kv_cache_management_mode="offload",
+        cuda_graphs_enabled=False,
+    )
+    allocated = iter((28404 * 1024**2, 12465 * 1024**2))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: next(allocated))
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+
+    evo2_generation._suspend_evo2_native_cache(native_dynamic)
+
+    assert native_dynamic.last_cache_release_evidence == {
+        "mode": "offload",
+        "tensor_state_allocated": False,
+        "allocated_before_mib": 28404,
+        "allocated_after_mib": 12465,
+    }
+
+
+def test_nonpersistent_cache_release_rejects_no_observed_device_memory_drop(monkeypatch):
+    class _Context:
+        is_tensor_state_allocated = True
+
+        def reset(self):
+            pass
+
+        def deallocate_inference_state_buffers(self):
+            self.is_tensor_state_allocated = False
+
+    native_dynamic = SimpleNamespace(
+        shared_dyn_ctx=_Context(),
+        kv_cache_management_mode="offload",
+        cuda_graphs_enabled=False,
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda: 12465 * 1024**2)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+
+    with pytest.raises(RuntimeError, match="did not reduce allocated device memory"):
+        evo2_generation._suspend_evo2_native_cache(native_dynamic)
+
+
 def test_nemo_worker_bypasses_generic_engine_for_evo2_adapter(monkeypatch):
     from nemo_rl.models.generation.megatron import megatron_worker
 

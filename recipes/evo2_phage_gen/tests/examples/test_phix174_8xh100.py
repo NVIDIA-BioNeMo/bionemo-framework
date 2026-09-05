@@ -369,9 +369,18 @@ def test_dry_run(tmp_path: Path) -> None:
         for line in log.splitlines()
         if "command: evo2_phage_run_gdpo " in line
     ]
-    assert len(gdpo_commands) == 2
+    assert len(gdpo_commands) == 3
+    pilot = next(command for command in gdpo_commands if "grpo.max_num_steps=3" in command)
+    reload = next(command for command in gdpo_commands if "grpo.max_num_steps=3" in command and command is not pilot)
+    full = next(command for command in gdpo_commands if "grpo.max_num_steps=3" not in command)
+    assert "logger.log_dir=" + str(result_root / "rl-pilot-reload/logs") in reload
+    assert "checkpointing.checkpoint_dir=" + str(result_root / "rl-pilot/checkpoints") in reload
+    assert "checkpointing.save_optimizer=false" in pilot
+    assert "checkpointing.save_optimizer=false" in reload
+    assert "checkpointing.save_optimizer=false" in full
+    assert "command: python -m bionemo.evo2_phage_gen.rl_pilot_qualification" in log
     assert all("logger.wandb_enabled=false" in command for command in gdpo_commands)
-    gdpo = gdpo_commands[0]
+    gdpo = pilot
     assert "checkpointing.pretrained_checkpoint.path=<rl-sft-checkpoint>" in gdpo
     assert "policy.model_name=bionemo/evo2_7b_base" in gdpo
     assert "policy.generation.top_k=5" in gdpo
@@ -493,14 +502,16 @@ def test_wandb_dry_run(tmp_path: Path) -> None:
     assert all("--wandb-project" not in command for command in sft_commands if command is not full_sft)
 
     gdpo_commands = [command for command in commands if command[:1] == ["evo2_phage_run_gdpo"]]
-    assert len(gdpo_commands) == 2
-    pilot = next(command for command in gdpo_commands if "grpo.max_num_steps=3" in command)
-    full_gdpo = next(command for command in gdpo_commands if command is not pilot)
-    assert "logger.wandb_enabled=false" in pilot
-    assert "grpo.val_at_start=false" in pilot
-    assert "grpo.val_period=2" in pilot
-    assert "grpo.val_at_end=true" in pilot
-    assert not any(part.startswith("logger.wandb.project=") for part in pilot)
+    assert len(gdpo_commands) == 3
+    pilots = [command for command in gdpo_commands if "grpo.max_num_steps=3" in command]
+    full_gdpo = next(command for command in gdpo_commands if command not in pilots)
+    assert len(pilots) == 2
+    for pilot in pilots:
+        assert "logger.wandb_enabled=false" in pilot
+        assert "grpo.val_at_start=false" in pilot
+        assert "grpo.val_period=2" in pilot
+        assert "grpo.val_at_end=true" in pilot
+        assert not any(part.startswith("logger.wandb.project=") for part in pilot)
     assert "logger.wandb_enabled=true" in full_gdpo
     assert "logger.wandb.project=custom-gdpo" in full_gdpo
     assert "logger.wandb.name=wandb-result-7b-base-gdpo" in full_gdpo
@@ -1281,5 +1292,5 @@ def test_topology_env(tmp_path: Path) -> None:
     assert "RL Ray CPU slots: 48" in log
     assert "policy.generation.mcore_generation_config.max_requests=96" in log
     assert "policy.generation.mcore_generation_config.prompt_batch_size=96" in log
-    assert log.count("policy.train_micro_batch_size=16") == 2
+    assert log.count("policy.train_micro_batch_size=16") == 3
     assert "RL policy train microbatch: 16; native packed mixed-length decode group size: 96" in log

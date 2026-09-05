@@ -95,9 +95,10 @@ resuming; `--resume-from` selects where checking resumes but does not create mis
 completion markers. A material prompt, reward, sampling, or model change should start a new result
 root. Stage 20 records its real-data restart smoke separately as `stages/20-sft-smoke.done`; it
 validates and reuses a complete converted base checkpoint instead of redownloading or reconverting
-it. Stage 40 likewise keeps `stages/40-pilot.done`, `stages/40-pilot-check.done`, and
-`stages/40-rl.done` distinct, and reuses only a validated schema-2 optimizer-free prepared SFT
-checkpoint. Do not create a marker unless its operation is known to have succeeded.
+it. Stage 40 likewise keeps `stages/40-pilot.done`, `stages/40-pilot-reload.done`,
+`stages/40-pilot-check.done`, and `stages/40-rl.done` distinct, and reuses only a validated schema-2
+optimizer-free prepared SFT checkpoint. Do not create a marker unless its operation is known to
+have succeeded.
 
 ### Optional W&B logging
 
@@ -169,8 +170,10 @@ capacity. The candidate MBS8 is paired with explicit cache offload in this 8×H1
 deallocates paged-KV and Hyena state before policy training, then restores them
 and recaptures graph runners because their buffer addresses changed. Non-persistent cache settings
 must reach MCore's `InferenceConfig`, and a release that leaves tensor state allocated fails rather
-than proceeding toward a later OOM. Persist-cache deployments need lifecycle-aware capacity
-qualification. Initial validation left about 12.55 GiB more allocated (152.25 versus 139.70 GiB)
+than proceeding toward a later OOM. The pilot also requires a direct `finish_generation` observation
+that PyTorch allocated memory decreased; accepting an offload config is not release evidence.
+Persist-cache deployments need lifecycle-aware capacity qualification. Initial validation left
+about 12.55 GiB more allocated (152.25 versus 139.70 GiB)
 in early single-GB300 trials, and roughly 29.9 GiB of device-wide framebuffer use made their
 capacity failures inconclusive. A corrected `val_at_start=false`, offload-cache run at MBS32 then
 completed two full optimizer-resident rollout/update cycles despite that external baseline. On
@@ -182,6 +185,14 @@ the TP1 signed-int32 GLU limit, making MBS32 the largest robust candidate on tha
 transfer it to H100: start with training, reach optimizer steady state, run a scheduled validation,
 and then complete a subsequent update on the deployed topology.
 Expandable segments fix fragmentation, not retained-state capacity.
+
+GDPO checkpoints are model-only by default. In a 7B TP1 qualification, full optimizer-state save
+exhausted global host memory after 20 otherwise healthy updates while MCore constructed sharded
+optimizer state; `save_optimizer=false` instead wrote the 13 GB checkpoint atomically in 15.06 s.
+The stage-40 pilot launches a separate process against its step-3 checkpoint and requires restored
+step, dataloader, and weights plus the expected fresh-Adam warning before full training. This is a
+usable recovery point, but reinitializing Adam means it is not a trajectory-identical resume.
+
 Optimizer state is offloaded during generation by default. On a device with measured HBM capacity,
 `policy.generation.mcore_generation_config.generation_adapter_config.preserve_optimizer_state_during_generation=true`
 avoids that per-step CPU round trip while still offloading gradients. Qualify it in a disposable
@@ -222,7 +233,7 @@ inapplicability remains candidate-level `INDETERMINATE`, not a safety `PASS`.
 | 10    | Safety-screen inputs and build leakage-controlled SFT splits                                |
 | 20    | Train, select, and evaluate SFT                                                             |
 | 30    | Calibrate generation and materialize RL prompt banks                                        |
-| 40    | Prepare the model-only SFT checkpoint, run the two-update pilot/check, train GDPO, and select RL |
+| 40    | Prepare SFT for RL, run the three-step pilot/reload/check, train GDPO, and select RL              |
 | 50    | Generate, SFT-score, deduplicate, safety-screen, hard-QC, cluster, and report 1,000 genomes |
 
 The result root is the computational notebook. `RUNLOG.md` records commands and liveness;

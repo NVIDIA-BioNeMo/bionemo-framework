@@ -9,6 +9,10 @@ run_id: "phix174_gdpo"
 
 checkpointing:
   checkpoint_dir: "data/checkpoints/${run_id}"
+  # Full Megatron optimizer serialization can exhaust host memory while constructing distributed
+  # sharded state. Model-only checkpoints atomically preserve policy weights, step, and dataloader
+  # state; a resumed process deliberately initializes fresh Adam state.
+  save_optimizer: false
   pretrained_checkpoint:
     # Start GDPO from the converted base Evo2 Microviridae checkpoint, not from a prior RL run.
     path: "data/checkpoints/evo2_7b_microviridae_mbridge"

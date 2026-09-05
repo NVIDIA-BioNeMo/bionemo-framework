@@ -351,6 +351,20 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-027-model-only-restart-gate",
+      "prompt": "My 7B RL preflight completed generation and training, but saving distributed optimizer state exhausted host memory. A model-only checkpoint was written. Is that enough to qualify the long run?",
+      "expected_output": "Prove the model-only checkpoint in a separate process and record its fresh-optimizer recovery semantics before qualifying the run.",
+      "assertions": [
+        "The response does not retry full optimizer serialization without first establishing sufficient host-memory capacity.",
+        "It checks the checkpoint contains completed policy weights, training-step state, and dataloader state.",
+        "It launches a separate process that restores the checkpoint and does not restart from step zero or consume another batch.",
+        "It requires the explicit fresh-optimizer diagnostic because optimizer state is absent.",
+        "It describes the recovery as usable but not trajectory-identical, and separately requires observed cache release when offload is configured."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

@@ -959,13 +959,26 @@ stage_40() {
       evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${rl_checkpoint}" \
       --prompt-data "${rl}/train.jsonl" --gpus-per-node "${NUM_GPUS}" \
       --control-fasta "${control}/reference-rotations.fasta" --control-dir "${control}"
-    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.train_micro_batch_size="${RL_TRAIN_MICRO_BATCH_SIZE}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.max_model_len="${RL_MAX_MODEL_LEN}" policy.generation.mcore_generation_config.max_requests="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.prompt_batch_size="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.kv_cache_management_mode=offload policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
+    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" checkpointing.save_optimizer=false policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.train_micro_batch_size="${RL_TRAIN_MICRO_BATCH_SIZE}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.max_model_len="${RL_MAX_MODEL_LEN}" policy.generation.mcore_generation_config.max_requests="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.prompt_batch_size="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.kv_cache_management_mode=offload policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
     note "RL policy train microbatch: ${RL_TRAIN_MICRO_BATCH_SIZE}; native packed mixed-length decode group size: ${RL_PROMPT_BATCH_SIZE}; generation context ceiling: ${RL_MAX_MODEL_LEN}"
     if [[ -f "${STAGE_DIR}/40-pilot.done" ]]; then
       note 'substage 40-pilot already complete'
     else
       monitored 'three-step post-validation GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" logger.wandb_enabled=false checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=3 grpo.val_at_start=false grpo.val_period=2 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
       [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-pilot.done"
+    fi
+    if [[ -f "${STAGE_DIR}/40-pilot-reload.done" ]]; then
+      note 'substage 40-pilot-reload already complete'
+    else
+      # A successful update is not enough: exercise the exact model-only checkpoint in a fresh
+      # process. max_num_steps equals the saved step, so a valid restore exits without training.
+      monitored 'model-only GDPO checkpoint reload' "${RESULT_ROOT}/rl-pilot-reload/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" logger.wandb_enabled=false checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=3 grpo.val_at_start=false grpo.val_period=2 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot-reload/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot-reload/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot-reload/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot-reload/logs"
+      run python -m bionemo.evo2_phage_gen.rl_pilot_qualification \
+        --checkpoint-root "${RESULT_ROOT}/rl-pilot/checkpoints" --expected-step 3 \
+        --runner-log "${RESULT_ROOT}/rl-pilot/runner.log" \
+        --reload-log "${RESULT_ROOT}/rl-pilot-reload/runner.log" \
+        --output "${RESULT_ROOT}/rl-pilot/qualification.json"
+      [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-pilot-reload.done"
     fi
     if [[ -f "${STAGE_DIR}/40-pilot-check.done" ]]; then
       note 'substage 40-pilot-check already complete'

@@ -86,11 +86,35 @@ def _suspend_evo2_native_cache(native_dynamic: Any) -> None:
     if cache_mode == "persist" or not bool(getattr(context, "is_tensor_state_allocated", True)):
         return
 
+    allocated_before = None
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        allocated_before = int(torch.cuda.memory_allocated())
     context.deallocate_inference_state_buffers()
     if bool(getattr(context, "is_tensor_state_allocated", True)):
         raise RuntimeError("Evo2 native inference state remained allocated after non-persistent cache release")
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+        allocated_after = int(torch.cuda.memory_allocated())
+        if allocated_before is None or allocated_after >= allocated_before:
+            raise RuntimeError(
+                "Evo2 native cache release did not reduce allocated device memory: "
+                f"before={allocated_before} after={allocated_after}"
+            )
+        release_evidence = {
+            "mode": cache_mode,
+            "tensor_state_allocated": False,
+            "allocated_before_mib": allocated_before // 1024**2,
+            "allocated_after_mib": allocated_after // 1024**2,
+        }
+        native_dynamic.last_cache_release_evidence = release_evidence
+        logger.info(
+            "Evo2 native cache release verified: mode=%s tensor_state_allocated=false "
+            "allocated_before_mib=%d allocated_after_mib=%d",
+            release_evidence["mode"],
+            release_evidence["allocated_before_mib"],
+            release_evidence["allocated_after_mib"],
+        )
     if getattr(native_dynamic, "cuda_graphs_enabled", False):
         from bionemo.evo2.run.infer import _reset_layer_cuda_graphs
 
