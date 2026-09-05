@@ -859,6 +859,7 @@ def _add_unavailable_sequence_safety_rewards(
     defaults: dict[str, object] = {
         "safety_gate_state": "INDETERMINATE",
         "safety_gate_pass": 0.0,
+        "reward_safety_penalty": 1.0,
         "safety_gate_reason_codes": reasons_json,
         "safety_environment_healthy": 0.0,
         "safety_gate_measurement_available": 0.0,

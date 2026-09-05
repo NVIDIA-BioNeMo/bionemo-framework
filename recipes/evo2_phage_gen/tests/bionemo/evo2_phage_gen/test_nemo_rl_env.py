@@ -1008,7 +1008,7 @@ def test_scored_records_exclude_full_sequence_from_rollout_metadata():
             "safety_nested_payload": [{"state": "PASS"}],
             "safety_list_payload": [["PASS"]],
             "safety_unbounded_payload": ["x" * 4097],
-            "safety_invalid_unicode": ["\ud800"],
+            "safety_invalid_unicode": pd.Series(["\ud800"], dtype=object),
             "reward_nonfinite": [float("inf")],
             "reward_nan": [float("nan")],
             "reward_complex": [1 + 2j],
