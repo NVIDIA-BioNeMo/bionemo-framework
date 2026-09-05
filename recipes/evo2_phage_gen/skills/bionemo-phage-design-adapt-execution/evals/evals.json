@@ -101,6 +101,19 @@
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-008-dirty-gpu-capacity",
+      "prompt": "A full-shape RL pilot OOMs, so reduce its microbatch. Before the job started, nvidia-smi reported substantial memory in use but listed no compute-process PID.",
+      "expected_output": "Treat the capacity result as confounded by an external GPU-memory owner and inspect a clean device before resizing the workload.",
+      "assertions": [
+        "The response compares per-GPU used/free memory with the compute-process PID list before attributing the OOM to the job.",
+        "Memory in use with no listed compute process is treated as external display, persistence, or platform allocation rather than model capacity.",
+        "It does not classify the microbatch as too large or keep shrinking it until the device is clean or the external allocation is accounted for.",
+        "It still uses job-owned PyTorch allocated/reserved memory and a full lifecycle pilot to qualify the eventual setting."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
     }
   ]
 }

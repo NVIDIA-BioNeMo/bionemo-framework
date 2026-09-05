@@ -324,6 +324,19 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-025-dual-training-horizon",
+      "prompt": "Configure a legacy synchronous GRPO run for 5,000 optimizer steps. Its train bank has 96 prompt rows, it consumes 16 prompts per step, and max_num_epochs is 500.",
+      "expected_output": "Raise or derive the epoch ceiling so it cannot terminate the requested step horizon at 3,000 updates.",
+      "assertions": [
+        "The response recognizes that both max_num_steps and max_num_epochs bound the loop.",
+        "It computes six optimizer steps per epoch from 96 rows and 16 prompts per step.",
+        "It sets max_num_epochs to at least ceil(5000 / 6), such as 1,000, rather than assuming max_num_steps alone controls termination.",
+        "It keeps max_num_steps as a safety ceiling rather than treating all 5,000 steps as scientifically mandatory."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

@@ -9,7 +9,7 @@ For SFT, RL, and generation:
 - keep deterministic record-to-output mapping and requested generation counts; and
 - leave headroom for validation, checkpointing, and the transition from training to generation.
 
-When an OOM occurs, first reproduce it and inspect competing processes and peak allocation. Then adjust microbatching, accumulation, parallelism, placement, activation checkpointing, or allocator settings based on measurements. Do not silently truncate genomes, crop prompts, change target length, drop loss-bearing tokens, or weaken QC to make a run fit.
+When an OOM occurs, first reproduce it and inspect competing processes and peak allocation. Compare `nvidia-smi --query-gpu=memory.used,memory.free --format=csv` with `nvidia-smi --query-compute-apps=pid --format=csv`: material use with no compute PID is external allocation, so account for or clear it before classifying the job's capacity. Then adjust microbatching, accumulation, parallelism, placement, activation checkpointing, or allocator settings based on measurements. Do not silently truncate genomes, crop prompts, change target length, drop loss-bearing tokens, or weaken QC to make a run fit.
 
 Use an accelerator for an external filter only when the actual tool/database supports it, a realistic benchmark improves throughput, and a control panel agrees with the accepted path. Otherwise use the measured CPU path. Missing or failed required filters remain visible and cannot become a PASS.
 

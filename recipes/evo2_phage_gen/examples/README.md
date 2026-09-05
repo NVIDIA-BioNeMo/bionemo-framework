@@ -140,6 +140,8 @@ decode batch contains two prompt records, while the global update contains all e
 strata: two prompt records and 32 generated sequences per stratum. Validation remains a separate
 96-record mixture. The 1,000-design final rollout uses 125 prompts per stratum: two 500-record,
 same-length files alternate four anchors and combine to exactly 1,000 records.
+Legacy synchronous GRPO is bounded by both steps and epochs; this 96-row bank supplies six updates
+per epoch, so the configured 500 epochs safely exceeds the requested 500-step ceiling.
 
 The launcher sets `max_model_len` to the smallest 256-token boundary covering the longest selected
 prompt, its two-token `+~` prefix, and `max_new_tokens` (5,632 with the defaults), rather than

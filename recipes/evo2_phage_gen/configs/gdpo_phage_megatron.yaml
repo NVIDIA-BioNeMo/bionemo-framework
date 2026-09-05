@@ -17,6 +17,8 @@ checkpointing:
   higher_is_better: true
 
 grpo:
+  # Legacy synchronous GRPO stops at either limit. This 96-row bank yields six updates per epoch
+  # at 16 prompts/update, so 500 epochs permits 3,000 updates and cannot truncate the 500-step run.
   max_num_epochs: 500
   # Sixteen prompt records cover two examples from each anchor-by-length stratum.
   # Sixteen generations per prompt make a 256-rollout global update; on DP8 each
