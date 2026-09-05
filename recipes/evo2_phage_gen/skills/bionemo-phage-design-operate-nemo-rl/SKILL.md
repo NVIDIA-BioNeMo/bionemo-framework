@@ -28,7 +28,8 @@ one-update pass is not steady-state evidence. Because validation can allocate or
 state, also complete a validation followed by another optimizer update before qualifying the
 setting. In the maintained 8×H100 launcher, vary only `RL_TRAIN_MICRO_BATCH_SIZE` for this pilot so
 global rollout and optimizer batch semantics stay fixed. Expandable allocator segments can fix fragmentation but cannot compensate for retained
-cache or optimizer state.
+cache or optimizer state. Before shrinking a microbatch after OOM, rule out device memory held by
+processes outside the job.
 
 Do not qualify filtered sampling by silently masking mismatched rows. Compare every active sampled action's generation log-probability with a full teacher-forced policy replay using the exact prompt, completion, checkpoint, sampling transform, and EOD handling. Include both EOD-terminated and length-capped rows. Report per-token and per-sequence error before applying the configured mismatch guard, plus error grouped by absolute token position modulo the paged-KV block size. Any rejected row, non-finite value, or boundary-localized spike is a `diagnose` result even when the aggregate median is small. A lone finite, non-boundary per-token tail that leaves the configured per-sequence statistic accepted is an inspect-and-record advisory, not by itself an automatic hold: do not reuse a sequence-level threshold as a per-token kill switch. Escalate it when it recurs, clusters, changes the aggregate distribution, or crosses a separately calibrated hard per-token guard. Requalify across at least two complete generation→replay/refit cycles at the deployed batch shape, topology, precision, graph scope, page size, and KV-index dispatch; a smaller BF16/TP profile or a forward-only unit approximation does not qualify a different FP8/TP rollout profile.
 

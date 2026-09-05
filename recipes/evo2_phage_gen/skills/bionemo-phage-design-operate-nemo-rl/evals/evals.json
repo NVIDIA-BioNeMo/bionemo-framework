@@ -338,6 +338,19 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-026-dirty-device-capacity",
+      "prompt": "An RL policy microbatch OOMed, but nvidia-smi reports about 30 GiB in use after every compute process has exited. Should I mark that microbatch as too large?",
+      "expected_output": "Treat the capacity result as confounded, identify the external allocation, and retry on a clean device before changing the microbatch.",
+      "assertions": [
+        "The response compares GPU memory used/free with the listed compute-process PIDs.",
+        "It recognizes memory use with no job process as external or stale device occupancy.",
+        "It does not classify the tested microbatch as intrinsically failing from the contaminated run.",
+        "It cleans or moves the job and repeats the same full-shape capacity gate before tuning downward."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }
