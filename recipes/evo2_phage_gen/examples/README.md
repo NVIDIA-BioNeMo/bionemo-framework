@@ -114,8 +114,9 @@ Authenticate with `wandb login` (or provide `WANDB_API_KEY` through a secret man
 The project flags are optional and show their defaults. Run names are derived from the result-root
 name and model variant. SFT has its own optional W&B run. The GDPO W&B run is not created until the
 full stage-40 training starts: calibration and the pilot stay offline, while the full run honors
-the entity, project, and name overrides. Never pass an API key as a launcher argument. Completed
-stages are not uploaded retroactively.
+the entity, project, and name overrides. The launcher gives W&B initialization 300 seconds; set
+`WANDB_INIT_TIMEOUT` to override it. Never pass an API key as a launcher argument. Completed stages
+are not uploaded retroactively.
 
 ### Choose sampling settings
 

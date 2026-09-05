@@ -186,6 +186,7 @@ def test_dry_run(tmp_path: Path) -> None:
         "wandb_rl_project": "evo2-phage-design-gdpo",
         "wandb_sft_run_name": "result-7b-base-sft",
         "wandb_rl_run_name": "result-7b-base-gdpo",
+        "wandb_init_timeout": 300,
     }
     log = (result_root / "RUNLOG.md").read_text()
     assert "TARGET_LENGTH=5444" in log
@@ -475,7 +476,7 @@ def test_wandb_dry_run(tmp_path: Path) -> None:
             str(result_root),
         ],
         cwd=RECIPE_ROOT,
-        env={**os.environ, "WANDB_API_KEY": "do-not-record"},
+        env={**os.environ, "WANDB_API_KEY": "do-not-record", "WANDB_INIT_TIMEOUT": "301"},
         check=False,
         capture_output=True,
         text=True,
@@ -490,6 +491,7 @@ def test_wandb_dry_run(tmp_path: Path) -> None:
     assert settings["wandb_rl_project"] == "custom-gdpo"
     assert settings["wandb_sft_run_name"] == "wandb-result-7b-base-sft"
     assert settings["wandb_rl_run_name"] == "wandb-result-7b-base-gdpo"
+    assert settings["wandb_init_timeout"] == 301
 
     log = (result_root / "RUNLOG.md").read_text()
     assert "do-not-record" not in log

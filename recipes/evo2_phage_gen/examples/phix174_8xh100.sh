@@ -24,6 +24,7 @@ WANDB_OPTION_CONFIGURED=0
 WANDB_ENTITY_NAME="${WANDB_ENTITY:-}"
 WANDB_SFT_PROJECT_NAME='evo2-phage-design-sft'
 WANDB_RL_PROJECT_NAME='evo2-phage-design-gdpo'
+WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT:-300}"
 NUM_GPUS="${NUM_GPUS:-8}"
 NUM_CPUS="${NUM_CPUS:-${NEMO_RL_RAY_NUM_CPUS:-$(nproc)}}"
 for resource_name in NUM_GPUS NUM_CPUS; do
@@ -85,6 +86,10 @@ if ((256 % (NUM_GPUS * RL_TRAIN_MICRO_BATCH_SIZE) != 0)); then
 fi
 if [[ ! "${SFT_MAX_STEPS}" =~ ^[1-9][0-9]*$ ]]; then
   printf 'SFT_MAX_STEPS must be a positive integer; got %q\n' "${SFT_MAX_STEPS}" >&2
+  exit 2
+fi
+if [[ ! "${WANDB_INIT_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'WANDB_INIT_TIMEOUT must be a positive integer; got %q\n' "${WANDB_INIT_TIMEOUT}" >&2
   exit 2
 fi
 
@@ -210,6 +215,8 @@ WANDB_RL_RUN_NAME="${WANDB_RUN_STEM}-gdpo"
 declare -a SFT_WANDB_ARGS=()
 declare -a RL_WANDB_ARGS=(logger.wandb_enabled=false)
 if [[ "${WANDB_ENABLED}" == "1" ]]; then
+  # A loaded multi-GPU node can take longer than W&B's 90-second default handshake.
+  export WANDB_INIT_TIMEOUT
   SFT_WANDB_ARGS=(
     --wandb-project "${WANDB_SFT_PROJECT_NAME}"
     --wandb-run-name "${WANDB_SFT_RUN_NAME}"
@@ -673,7 +680,8 @@ python - "${RESULT_ROOT}/settings.json" "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}
   "${SFT_TENSOR_PARALLEL_SIZE}" "${SFT_MAX_STEPS}" "${RL_TRAIN_MICRO_BATCH_SIZE}" \
   "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
   "${WANDB_ENABLED}" "${WANDB_ENTITY_NAME}" "${WANDB_SFT_PROJECT_NAME}" "${WANDB_RL_PROJECT_NAME}" \
-  "${WANDB_SFT_RUN_NAME}" "${WANDB_RL_RUN_NAME}" "${INFERENCE_PRECISION_NAME}" <<'PY'
+  "${WANDB_SFT_RUN_NAME}" "${WANDB_RL_RUN_NAME}" "${WANDB_INIT_TIMEOUT}" \
+  "${INFERENCE_PRECISION_NAME}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -695,6 +703,7 @@ from pathlib import Path
     wandb_rl_project,
     wandb_sft_run_name,
     wandb_rl_run_name,
+    wandb_init_timeout,
     inference_precision,
 ) = sys.argv[1:]
 wandb_is_enabled = wandb_enabled == "1"
@@ -718,6 +727,7 @@ settings = {
     "wandb_rl_project": wandb_rl_project,
     "wandb_sft_run_name": wandb_sft_run_name,
     "wandb_rl_run_name": wandb_rl_run_name,
+    "wandb_init_timeout": int(wandb_init_timeout),
 }
 Path(output).write_text(json.dumps(settings, indent=2) + "\n")
 PY
