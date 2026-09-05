@@ -164,8 +164,10 @@ deallocates paged-KV and Hyena state before policy training, then restores them
 and recaptures graph runners because their buffer addresses changed. Non-persistent cache settings
 must reach MCore's `InferenceConfig`, and a release that leaves tensor state allocated fails rather
 than proceeding toward a later OOM. Persist-cache deployments need their own two-update capacity
-qualification and may require a smaller policy microbatch; expandable segments fix fragmentation,
-not retained-state capacity.
+qualification; on the measured single-GB300 profile, both MBS32 and MBS16 passed update one but
+OOMed during update two after optimizer state materialized. Do not infer a portable fallback
+microbatch from one update: use true cache release or qualify a lower value through at least two.
+Expandable segments fix fragmentation, not retained-state capacity.
 Optimizer state is offloaded during generation by default. On a device with measured HBM capacity,
 `policy.generation.mcore_generation_config.generation_adapter_config.preserve_optimizer_state_during_generation=true`
 avoids that per-step CPU round trip while still offloading gradients. Qualify it in a disposable
