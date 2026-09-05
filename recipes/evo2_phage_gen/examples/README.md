@@ -156,7 +156,8 @@ trains for two updates, validates, and then completes a third update. Adam state
 during update one, and the post-validation update detects memory or graph state retained by
 validation, so a one-update pass or terminal validation does not establish steady-state capacity.
 MBS8 is a conservative, unqualified starting point for the 8×H100 pilot, not a measured
-steady-state maximum. For Evo2 7B at TP1, its largest local GLU output
+steady-state maximum. Set `RL_TRAIN_MICRO_BATCH_SIZE` to qualify another candidate through the same
+pilot without changing global batch or rollout size. For Evo2 7B at TP1, its largest local GLU output
 is `8 × 5,632 × 11,008 = 495,976,448` elements, below signed-int32 indexing; the launcher
 rejects larger resolved shapes before worker allocation. TP2 halves the local FFN width and DP only
 distributes the global batch, so neither replaces a full-shape memory and replay qualification on

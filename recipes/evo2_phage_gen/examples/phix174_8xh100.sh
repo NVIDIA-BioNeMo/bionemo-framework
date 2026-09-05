@@ -61,6 +61,7 @@ PHAROKKA_DATABASE_RELEASE="${PHAROKKA_DATABASE_RELEASE:-Pharokka database v1.11.
 CALIBRATION_WORKERS="${CALIBRATION_WORKERS:-8}"
 # Global rollout 256 over DP8 gives 32 local requests. This is distinct from policy training MBS.
 RL_PROMPT_BATCH_SIZE="${RL_PROMPT_BATCH_SIZE:-32}"
+RL_TRAIN_MICRO_BATCH_SIZE="${RL_TRAIN_MICRO_BATCH_SIZE:-8}"
 SAFETY_BATCH_SIZE="${SAFETY_BATCH_SIZE:-128}"
 SAFETY_ORF_WORKERS="${SAFETY_ORF_WORKERS:-32}"
 SAFETY_THREADS="${SAFETY_THREADS:-32}"
@@ -68,6 +69,16 @@ SAFETY_PHROGS_THREADS="${SAFETY_PHROGS_THREADS:-64}"
 PHIX174_HOST_EVIDENCE_JSON='{"source":"NCBI Datasets v2alpha genome dataset report","source_version":"NCBI Datasets v2alpha API","replication_host_domains":["BACTERIA"],"confirmed":true,"metadata":{"accession":"NC_001422.1","intended_design_context":"PhiX/Microviridae bacterial phage"}}'
 if [[ ! "${RL_PROMPT_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
   printf 'RL_PROMPT_BATCH_SIZE must be a positive integer; got %q\n' "${RL_PROMPT_BATCH_SIZE}" >&2
+  exit 2
+fi
+if [[ ! "${RL_TRAIN_MICRO_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'RL_TRAIN_MICRO_BATCH_SIZE must be a positive integer; got %q\n' \
+    "${RL_TRAIN_MICRO_BATCH_SIZE}" >&2
+  exit 2
+fi
+if ((256 % (NUM_GPUS * RL_TRAIN_MICRO_BATCH_SIZE) != 0)); then
+  printf 'RL global batch 256 must be divisible by NUM_GPUS * RL_TRAIN_MICRO_BATCH_SIZE (%s * %s)\n' \
+    "${NUM_GPUS}" "${RL_TRAIN_MICRO_BATCH_SIZE}" >&2
   exit 2
 fi
 if [[ ! "${SFT_MAX_STEPS}" =~ ^[1-9][0-9]*$ ]]; then
@@ -657,7 +668,8 @@ if [[ "${DRY_RUN}" != "1" ]]; then
 fi
 note "planned topology: ${NUM_GPUS} GPUs, SFT tensor parallel ${SFT_TENSOR_PARALLEL_SIZE}, ${NUM_CPUS} logical CPUs; inference precision ${INFERENCE_PRECISION_NAME}"
 python - "${RESULT_ROOT}/settings.json" "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}" \
-  "${SFT_TENSOR_PARALLEL_SIZE}" "${SFT_MAX_STEPS}" "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
+  "${SFT_TENSOR_PARALLEL_SIZE}" "${SFT_MAX_STEPS}" "${RL_TRAIN_MICRO_BATCH_SIZE}" \
+  "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
   "${WANDB_ENABLED}" "${WANDB_ENTITY_NAME}" "${WANDB_SFT_PROJECT_NAME}" "${WANDB_RL_PROJECT_NAME}" \
   "${WANDB_SFT_RUN_NAME}" "${WANDB_RL_RUN_NAME}" "${INFERENCE_PRECISION_NAME}" <<'PY'
 import json
@@ -671,6 +683,7 @@ from pathlib import Path
     gpu_type,
     sft_tensor_parallel_size,
     sft_max_steps,
+    rl_train_micro_batch_size,
     model_variant,
     base_checkpoint,
     model_size,
@@ -689,6 +702,7 @@ settings = {
     "gpu_type": gpu_type,
     "sft_tensor_parallel_size": int(sft_tensor_parallel_size),
     "sft_max_steps": int(sft_max_steps),
+    "rl_train_micro_batch_size": int(rl_train_micro_batch_size),
     "model_variant": model_variant,
     "base_checkpoint": base_checkpoint,
     "model_size": model_size,
@@ -945,8 +959,8 @@ stage_40() {
       evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${rl_checkpoint}" \
       --prompt-data "${rl}/train.jsonl" --gpus-per-node "${NUM_GPUS}" \
       --control-fasta "${control}/reference-rotations.fasta" --control-dir "${control}"
-    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.max_model_len="${RL_MAX_MODEL_LEN}" policy.generation.mcore_generation_config.max_requests="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.prompt_batch_size="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.kv_cache_management_mode=offload policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
-    note "RL native packed mixed-length decode group size: ${RL_PROMPT_BATCH_SIZE}; generation context ceiling: ${RL_MAX_MODEL_LEN}"
+    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.train_micro_batch_size="${RL_TRAIN_MICRO_BATCH_SIZE}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.max_model_len="${RL_MAX_MODEL_LEN}" policy.generation.mcore_generation_config.max_requests="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.prompt_batch_size="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.kv_cache_management_mode=offload policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
+    note "RL policy train microbatch: ${RL_TRAIN_MICRO_BATCH_SIZE}; native packed mixed-length decode group size: ${RL_PROMPT_BATCH_SIZE}; generation context ceiling: ${RL_MAX_MODEL_LEN}"
     if [[ -f "${STAGE_DIR}/40-pilot.done" ]]; then
       note 'substage 40-pilot already complete'
     else

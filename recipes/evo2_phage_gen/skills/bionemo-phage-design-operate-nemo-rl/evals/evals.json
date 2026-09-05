@@ -320,6 +320,7 @@
         "It completes at least two full-shape optimizer updates so Adam state is materialized.",
         "It schedules validation after training and then completes another optimizer update to expose retained validation state.",
         "It tunes policy microbatch separately from rollout or packed-decode batch capacity.",
+        "For the maintained 8xH100 launcher it uses RL_TRAIN_MICRO_BATCH_SIZE so global rollout and optimizer batch semantics remain fixed.",
         "It qualifies the actual deployed GPU topology and does not transfer a GB300 result to 8xH100 by assumption."
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",

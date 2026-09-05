@@ -172,6 +172,7 @@ def test_dry_run(tmp_path: Path) -> None:
         "gpu_type": "not queried (dry run)",
         "sft_tensor_parallel_size": 2,
         "sft_max_steps": 12000,
+        "rl_train_micro_batch_size": 8,
         "model_variant": "7b-base",
         "base_checkpoint": "evo2/7b-8k:1.0",
         "model_size": "evo2_7b_base",
@@ -379,7 +380,7 @@ def test_dry_run(tmp_path: Path) -> None:
     assert "policy.generation.mcore_generation_config.max_requests=32" in gdpo
     assert "policy.generation.mcore_generation_config.prompt_batch_size=32" in gdpo
     assert "policy.generation.mcore_generation_config.kv_cache_management_mode=offload" in gdpo
-    assert "RL native packed mixed-length decode group size: 32" in log
+    assert "RL policy train microbatch: 8; native packed mixed-length decode group size: 32" in log
 
     rollout_commands = [
         shlex.split(line.partition("command: ")[2])
@@ -1248,6 +1249,7 @@ def test_topology_env(tmp_path: Path) -> None:
             "NUM_GPUS": "4",
             "NUM_CPUS": "48",
             "RL_PROMPT_BATCH_SIZE": "96",
+            "RL_TRAIN_MICRO_BATCH_SIZE": "16",
             "SFT_TENSOR_PARALLEL_SIZE": "1",
             "NEMO_RL_RAY_NUM_CPUS": "",
         },
@@ -1262,6 +1264,7 @@ def test_topology_env(tmp_path: Path) -> None:
     assert settings["gpu_count"] == 4
     assert settings["cpu_count"] == 48
     assert settings["sft_tensor_parallel_size"] == 1
+    assert settings["rl_train_micro_batch_size"] == 16
     log = (result_root / "RUNLOG.md").read_text()
     commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
     distributed = [command for command in commands if command[:1] == ["torchrun"] and "--nproc-per-node" in command]
@@ -1278,4 +1281,5 @@ def test_topology_env(tmp_path: Path) -> None:
     assert "RL Ray CPU slots: 48" in log
     assert "policy.generation.mcore_generation_config.max_requests=96" in log
     assert "policy.generation.mcore_generation_config.prompt_batch_size=96" in log
-    assert "RL native packed mixed-length decode group size: 96" in log
+    assert log.count("policy.train_micro_batch_size=16") == 2
+    assert "RL policy train microbatch: 16; native packed mixed-length decode group size: 96" in log
