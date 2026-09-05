@@ -54,6 +54,7 @@ for ((gpu_index=0; gpu_index<NUM_GPUS; gpu_index++)); do
   GPU_IDS+="${GPU_IDS:+ }${gpu_index}"
 done
 MONITOR_INTERVAL_SECONDS="${MONITOR_INTERVAL_SECONDS:-600}"
+SFT_MAX_STEPS="${SFT_MAX_STEPS:-12000}"
 PHAROKKA_DATABASE_URL="${PHAROKKA_DATABASE_URL:-https://zenodo.org/records/21755221/files/pharokka_v1.11.0_databases.tar.gz?download=1}"
 PHAROKKA_DATABASE_MD5="${PHAROKKA_DATABASE_MD5:-143bb375ddb0b0653e5cb5671f4a7629}"
 PHAROKKA_DATABASE_RELEASE="${PHAROKKA_DATABASE_RELEASE:-Pharokka database v1.11.0 / PHROGs v4}"
@@ -67,6 +68,10 @@ SAFETY_PHROGS_THREADS="${SAFETY_PHROGS_THREADS:-64}"
 PHIX174_HOST_EVIDENCE_JSON='{"source":"NCBI Datasets v2alpha genome dataset report","source_version":"NCBI Datasets v2alpha API","replication_host_domains":["BACTERIA"],"confirmed":true,"metadata":{"accession":"NC_001422.1","intended_design_context":"PhiX/Microviridae bacterial phage"}}'
 if [[ ! "${RL_PROMPT_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
   printf 'RL_PROMPT_BATCH_SIZE must be a positive integer; got %q\n' "${RL_PROMPT_BATCH_SIZE}" >&2
+  exit 2
+fi
+if [[ ! "${SFT_MAX_STEPS}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'SFT_MAX_STEPS must be a positive integer; got %q\n' "${SFT_MAX_STEPS}" >&2
   exit 2
 fi
 
@@ -652,7 +657,7 @@ if [[ "${DRY_RUN}" != "1" ]]; then
 fi
 note "planned topology: ${NUM_GPUS} GPUs, SFT tensor parallel ${SFT_TENSOR_PARALLEL_SIZE}, ${NUM_CPUS} logical CPUs; inference precision ${INFERENCE_PRECISION_NAME}"
 python - "${RESULT_ROOT}/settings.json" "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}" \
-  "${SFT_TENSOR_PARALLEL_SIZE}" "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
+  "${SFT_TENSOR_PARALLEL_SIZE}" "${SFT_MAX_STEPS}" "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
   "${WANDB_ENABLED}" "${WANDB_ENTITY_NAME}" "${WANDB_SFT_PROJECT_NAME}" "${WANDB_RL_PROJECT_NAME}" \
   "${WANDB_SFT_RUN_NAME}" "${WANDB_RL_RUN_NAME}" "${INFERENCE_PRECISION_NAME}" <<'PY'
 import json
@@ -665,6 +670,7 @@ from pathlib import Path
     cpu_count,
     gpu_type,
     sft_tensor_parallel_size,
+    sft_max_steps,
     model_variant,
     base_checkpoint,
     model_size,
@@ -682,6 +688,7 @@ settings = {
     "cpu_count": int(cpu_count),
     "gpu_type": gpu_type,
     "sft_tensor_parallel_size": int(sft_tensor_parallel_size),
+    "sft_max_steps": int(sft_max_steps),
     "model_variant": model_variant,
     "base_checkpoint": base_checkpoint,
     "model_size": model_size,
@@ -812,7 +819,7 @@ stage_20() {
       monitored 'SFT smoke' "${RESULT_ROOT}/sft/smoke.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 2 --eval-interval 1 --eval-iters 1 --warmup-steps 0 --decay-steps 2 --result-dir "${RESULT_ROOT}/sft/smoke" --experiment-name evo2-smoke
       [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/20-sft-smoke.done"
     fi
-    monitored '12,000-step SFT' "${sft}/train.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 12000 --eval-interval 400 --eval-iters 4 --lr 1e-5 --min-lr 1e-6 --warmup-steps 600 --decay-steps 11400 --enable-preemption --keep-best-k 3 --most-recent-k 1 --checkpoint-metric-name 'lm loss' --strict-checkpoint-metric --checkpoint-metric-step-tolerance 1 --result-dir "${sft}" --experiment-name evo2 "${SFT_WANDB_ARGS[@]}"
+    monitored 'SFT training' "${sft}/train.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps "${SFT_MAX_STEPS}" --eval-interval 400 --eval-iters 4 --lr 1e-5 --min-lr 1e-6 --warmup-steps 600 --decay-steps 11400 --enable-preemption --keep-best-k 3 --most-recent-k 1 --checkpoint-metric-name 'lm loss' --strict-checkpoint-metric --checkpoint-metric-step-tolerance 1 --result-dir "${sft}" --experiment-name evo2 "${SFT_WANDB_ARGS[@]}"
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/20-sft.done"
   fi
   [[ "${DRY_RUN}" == "1" ]] && selected='<selected-sft>' || selected="$(select_checkpoint sft "${sft}/evo2/tb_logs" "${sft}/evo2/checkpoints" "${RESULT_ROOT}/sft/checkpoint-selection.json")"

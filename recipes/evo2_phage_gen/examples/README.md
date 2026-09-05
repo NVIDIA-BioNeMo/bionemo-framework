@@ -268,7 +268,9 @@ The reference topology is eight H100 80 GB GPUs. `NUM_GPUS` defaults to 8 and `N
 `nproc`. SFT tensor parallelism defaults to 1 on a single GPU and 2 otherwise; override
 `SFT_TENSOR_PARALLEL_SIZE` only after a full-shape smoke test. Packed dynamic prefill interleaves
 the selected prompt lengths inside each deterministic GPU shard, so length-stratum count does not
-need to divide a microbatch or the GPU count. Use tmux or a scheduler for the long stages.
+need to divide a microbatch or the GPU count. `SFT_MAX_STEPS` defaults to 12,000 as a safety ceiling;
+lower it only to a persisted validation decision boundary when cleanly completing an evidence-stopped
+compatible run. Use tmux or a scheduler for the long stages.
 
 BF16 remains the portable default. After H100/H200 qualification, pass
 `--hopper-fp8-inference` to use regular FP8 across compatible 7B linears for calibration, rollout,

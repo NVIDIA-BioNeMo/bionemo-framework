@@ -171,6 +171,7 @@ def test_dry_run(tmp_path: Path) -> None:
         "gpu_count": 8,
         "gpu_type": "not queried (dry run)",
         "sft_tensor_parallel_size": 2,
+        "sft_max_steps": 12000,
         "model_variant": "7b-base",
         "base_checkpoint": "evo2/7b-8k:1.0",
         "model_size": "evo2_7b_base",
@@ -557,6 +558,27 @@ def test_single_gpu_plan(tmp_path: Path) -> None:
     assert all("--ignore-eos" not in command for command in rollout)
     assert all("--preserve-eos-token" in command for command in rollout)
     assert "interleave prompt lengths (16 24) across 1 deterministic mixed-length shard(s)" in log
+
+
+def test_sft_step_override(tmp_path: Path) -> None:
+    result_root = tmp_path / "sft-step-override"
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env={**os.environ, "SFT_MAX_STEPS": "2400"},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((result_root / "settings.json").read_text())["sft_max_steps"] == 2400
+    log = (result_root / "RUNLOG.md").read_text()
+    commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
+    sft_commands = [command for command in commands if command[:1] == ["torchrun"] and "train_evo2" in command]
+    full_sft = next(command for command in sft_commands if "--enable-preemption" in command)
+    assert full_sft[full_sft.index("--max-steps") + 1] == "2400"
 
 
 def test_sampling_selection_allows_length_count_that_does_not_divide_batches(tmp_path: Path) -> None:
@@ -965,7 +987,7 @@ def test_substage_resume(tmp_path: Path) -> None:
     assert "substage 20-sft already complete" in log
     assert "monitor: SFT smoke" not in log
     assert "evo2_convert_nemo2_to_mbridge" not in log
-    assert "monitor: 12,000-step SFT" not in log
+    assert "monitor: SFT training" not in log
     assert "monitor: held-out SFT evaluation" in log
     assert "substage 30-calibration-generation already complete" in log
     assert "monitor: calibration generation" not in log
@@ -1046,7 +1068,7 @@ def test_stage20_smoke_marker_skips_smoke_but_runs_full_sft(tmp_path: Path) -> N
     assert completed.returncode == 0, completed.stderr
     log = (result_root / "RUNLOG.md").read_text()
     assert "monitor: SFT smoke" not in log
-    assert "monitor: 12,000-step SFT" in log
+    assert "monitor: SFT training" in log
 
 
 def test_stage40_reuses_validated_prepared_sft_without_source_state(tmp_path: Path) -> None:
