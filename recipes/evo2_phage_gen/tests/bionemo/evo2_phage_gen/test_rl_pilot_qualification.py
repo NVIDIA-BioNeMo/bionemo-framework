@@ -55,7 +55,7 @@ def _write_logs(tmp_path: Path, checkpoint: Path, *, optimizer_reinitialized: bo
     )
     reload_log = tmp_path / "reload.log"
     reload_lines = [
-        f"successfully loaded checkpoint from {checkpoint / 'policy/weights/iter_0000000'} "
+        f"successfully loaded checkpoint from {checkpoint / 'policy/weights'} "
         "[ t 0/1, p 0/1 ] at iteration 0\n"
     ]
     if optimizer_reinitialized:
@@ -92,7 +92,7 @@ def test_accepts_rich_wrapped_checkpoint_path_in_reload_log(tmp_path: Path) -> N
     root = tmp_path / "checkpoints"
     checkpoint = _write_checkpoint(root)
     runner_log, reload_log = _write_logs(tmp_path, checkpoint)
-    weights = str(checkpoint / "policy/weights/iter_0000000")
+    weights = str(checkpoint / "policy/weights")
     split = len(weights) // 2
     reload_log.write_text(
         "\x1b[36m(MegatronPolicyWorker pid=7)\x1b[0m successfully loaded checkpoint from\n"

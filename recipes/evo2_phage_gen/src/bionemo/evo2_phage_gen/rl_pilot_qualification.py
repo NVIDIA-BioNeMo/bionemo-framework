@@ -145,7 +145,7 @@ def validate_rl_pilot(
             raise ValueError("reload did not resolve the expected model-only checkpoint")
         if not fresh_optimizer:
             raise ValueError("reload did not report fresh optimizer initialization")
-    if _compact_console_text(f"successfully loaded checkpoint from {weights}") not in compact_reload_text:
+    if _compact_console_text(f"successfully loaded checkpoint from {weights.parent}") not in compact_reload_text:
         raise ValueError("reload did not report loading the expected policy weights")
     if _compact_console_text("Dataset swap detected") in compact_reload_text:
         raise ValueError("reload rejected the saved dataloader state as a dataset swap")
