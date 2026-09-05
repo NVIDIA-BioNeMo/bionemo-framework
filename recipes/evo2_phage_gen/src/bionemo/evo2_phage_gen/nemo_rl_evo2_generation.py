@@ -108,7 +108,7 @@ def _suspend_evo2_native_cache(native_dynamic: Any) -> None:
             "allocated_after_mib": allocated_after // 1024**2,
         }
         native_dynamic.last_cache_release_evidence = release_evidence
-        logger.info(
+        logger.warning(
             "Evo2 native cache release verified: mode=%s tensor_state_allocated=false "
             "allocated_before_mib=%d allocated_after_mib=%d",
             release_evidence["mode"],

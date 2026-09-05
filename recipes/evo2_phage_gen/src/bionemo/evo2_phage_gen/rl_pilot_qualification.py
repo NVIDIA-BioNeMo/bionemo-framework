@@ -31,6 +31,10 @@ _CACHE_RELEASE_PATTERN = re.compile(
     r"tensor_state_allocated=(?P<allocated>true|false) "
     r"allocated_before_mib=(?P<before>\d+) allocated_after_mib=(?P<after>\d+)"
 )
+_WORKER_CACHE_MEMORY_PATTERN = re.compile(
+    r"\[GPU Rank (?P<rank>\d+)\] finish_generation (?P<phase>START|END) \| "
+    r"alloc=(?P<allocated>\d+)MiB"
+)
 _TRAINING_STEP_PATTERN = re.compile(r"={5,}\s+Step\s+\d+/\d+\s+={5,}")
 
 
@@ -41,6 +45,32 @@ def _load_mapping(path: Path, *, description: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"{description} must contain a mapping: {path}")
     return payload
+
+
+def _observed_cache_releases(runner_text: str, *, cache_mode: str) -> list[int]:
+    """Return verified allocation drops from explicit or durable worker telemetry."""
+    releases = []
+    for match in _CACHE_RELEASE_PATTERN.finditer(runner_text):
+        before, after = int(match.group("before")), int(match.group("after"))
+        if match.group("mode") != cache_mode:
+            continue
+        if match.group("allocated") != "false" or after >= before:
+            raise ValueError("invalid finish_generation cache release evidence in pilot log")
+        releases.append(before - after)
+    if releases:
+        return releases
+
+    starts_by_rank: dict[int, int] = {}
+    for match in _WORKER_CACHE_MEMORY_PATTERN.finditer(runner_text):
+        rank = int(match.group("rank"))
+        allocated = int(match.group("allocated"))
+        if match.group("phase") == "START":
+            starts_by_rank[rank] = allocated
+            continue
+        before = starts_by_rank.pop(rank, None)
+        if before is not None and allocated < before:
+            releases.append(before - allocated)
+    return releases
 
 
 def validate_rl_pilot(
@@ -62,6 +92,14 @@ def validate_rl_pilot(
     config = _load_mapping(checkpoint / "config.yaml", description="resolved checkpoint config")
     if config.get("checkpointing", {}).get("save_optimizer") is not False:
         raise ValueError("pilot checkpoint must set checkpointing.save_optimizer=false")
+    cache_mode = (
+        config.get("policy", {})
+        .get("generation", {})
+        .get("mcore_generation_config", {})
+        .get("kv_cache_management_mode")
+    )
+    if cache_mode not in {"offload", "recompute"}:
+        raise ValueError("pilot checkpoint must use a releasing native KV-cache mode")
     if not (checkpoint / "train_dataloader.pt").is_file():
         raise ValueError(f"missing saved dataloader state: {checkpoint / 'train_dataloader.pt'}")
     weights = checkpoint / "policy/weights/iter_0000000"
@@ -73,14 +111,7 @@ def validate_rl_pilot(
 
     if not runner_log.is_file():
         raise ValueError(f"missing pilot runner log: {runner_log}")
-    releases = []
-    for match in _CACHE_RELEASE_PATTERN.finditer(runner_log.read_text(errors="replace")):
-        before, after = int(match.group("before")), int(match.group("after"))
-        if match.group("mode") not in {"offload", "recompute"}:
-            continue
-        if match.group("allocated") != "false" or after >= before:
-            raise ValueError("invalid finish_generation cache release evidence in pilot log")
-        releases.append(before - after)
+    releases = _observed_cache_releases(runner_log.read_text(errors="replace"), cache_mode=cache_mode)
     if not releases:
         raise ValueError("no verified finish_generation cache release found in pilot log")
 

@@ -30,7 +30,16 @@ def _write_model_only_checkpoint(root: Path, *, step: int = 3) -> Path:
     (checkpoint / "training_info.json").write_text(
         json.dumps({"total_steps": step, "current_step": step, "consumed_samples": step * 16}) + "\n"
     )
-    (checkpoint / "config.yaml").write_text(yaml.safe_dump({"checkpointing": {"save_optimizer": False}}))
+    (checkpoint / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "checkpointing": {"save_optimizer": False},
+                "policy": {
+                    "generation": {"mcore_generation_config": {"kv_cache_management_mode": "offload"}}
+                },
+            }
+        )
+    )
     (checkpoint / "train_dataloader.pt").write_bytes(b"state")
     return checkpoint
 
@@ -83,6 +92,26 @@ def test_rejects_configured_offload_without_finish_generation_release_evidence(t
             runner_log=runner_log,
             reload_log=reload_log,
         )
+
+
+def test_accepts_rank_matched_finish_generation_allocation_drop(tmp_path: Path) -> None:
+    root = tmp_path / "checkpoints"
+    checkpoint = _write_model_only_checkpoint(root)
+    runner_log, reload_log = _write_logs(tmp_path, checkpoint)
+    runner_log.write_text(
+        "[GPU Rank 3] finish_generation START | alloc=28404MiB private=0MiB\n"
+        "[GPU Rank 3] finish_generation END | alloc=12465MiB private=0MiB\n"
+    )
+
+    summary = validate_rl_pilot(
+        checkpoint_root=root,
+        expected_step=3,
+        runner_log=runner_log,
+        reload_log=reload_log,
+    )
+
+    assert summary["cache_release_observations"] == 1
+    assert summary["maximum_observed_cache_release_mib"] == 15939
 
 
 def test_rejects_reload_that_restarts_training_instead_of_restoring_step(tmp_path: Path) -> None:
