@@ -61,6 +61,8 @@ PHAROKKA_DATABASE_RELEASE="${PHAROKKA_DATABASE_RELEASE:-Pharokka database v1.11.
 CALIBRATION_WORKERS="${CALIBRATION_WORKERS:-8}"
 # Global rollout 256 over DP8 gives 32 local requests. This is distinct from policy training MBS.
 RL_PROMPT_BATCH_SIZE="${RL_PROMPT_BATCH_SIZE:-32}"
+# MBS8 is the conservative H100 start. Offload-cache MBS32 passed two steady-state GB300 updates,
+# but that does not establish H100 capacity; TP1 MBS64 also exceeds the signed-int32 local GLU span.
 RL_TRAIN_MICRO_BATCH_SIZE="${RL_TRAIN_MICRO_BATCH_SIZE:-8}"
 SAFETY_BATCH_SIZE="${SAFETY_BATCH_SIZE:-128}"
 SAFETY_ORF_WORKERS="${SAFETY_ORF_WORKERS:-32}"
