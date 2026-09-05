@@ -169,12 +169,13 @@ must reach MCore's `InferenceConfig`, and a release that leaves tensor state all
 than proceeding toward a later OOM. Persist-cache deployments need lifecycle-aware capacity
 qualification. Initial validation left about 12.55 GiB more allocated (152.25 versus 139.70 GiB)
 in the measured single-GB300 trials, so the earlier MBS32, MBS16, and MBS8 failures did not
-establish a pure MBS ceiling. A subsequent MBS32 trial without initial validation still missed its
-first policy update by about 0.82 GiB on that display-attached node, making MBS32 red for that
-operating point; MBS16 and MBS8 remain unqualified under the corrected lifecycle. Do not transfer
-any of those values to H100. Start with training, reach optimizer steady state, run a scheduled
-validation, and then complete a subsequent update. Expandable segments fix fragmentation, not
-retained-state capacity.
+establish a pure MBS ceiling. Follow-up MBS32 and MBS16 trials without initial validation also
+OOMed after clean rollouts, but about 29 GiB remained allocated device-wide after exit with no
+compute process, held through host display and persistence handles. These describe a contaminated
+operating node, not portable MBS red/green classifications; MBS8 has not been retested under the
+corrected conditions. Do not transfer any of those values to H100. Start with training, reach
+optimizer steady state, run a scheduled validation, and then complete a subsequent update.
+Expandable segments fix fragmentation, not retained-state capacity.
 Optimizer state is offloaded during generation by default. On a device with measured HBM capacity,
 `policy.generation.mcore_generation_config.generation_adapter_config.preserve_optimizer_state_during_generation=true`
 avoids that per-step CPU round trip while still offloading gradients. Qualify it in a disposable
