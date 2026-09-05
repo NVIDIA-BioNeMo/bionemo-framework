@@ -379,6 +379,20 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-029-checkpoint-host-oom-causality",
+      "prompt": "A GDPO job uses one already-batched reward RPC per update, but its Ray QC actor has max_concurrency=1000. Actor threads and host RSS rise every update, and the host finally OOMs during the first full optimizer checkpoint. Disable optimizer saving and relaunch.",
+      "expected_output": "Fix redundant actor concurrency, verify flat host RSS, and qualify the full-state save and fresh-process restore before considering model-only fallback.",
+      "assertions": [
+        "The response does not infer that optimizer serialization is the root cause merely because the OOM occurs during checkpointing.",
+        "It matches actor concurrency to the one already-batched RPC and uses max_concurrency=1.",
+        "It monitors actor thread count, actor RSS, total host available memory, and checkpoint-process RSS across updates and the first save.",
+        "It keeps optimizer state by default after the fixed actor completes a full-state checkpoint and proves a no-training fresh-process restore without fresh Adam initialization.",
+        "It uses save_optimizer=false only if the fixed-actor deployed topology still lacks host capacity, and labels that recovery non-trajectory-identical."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

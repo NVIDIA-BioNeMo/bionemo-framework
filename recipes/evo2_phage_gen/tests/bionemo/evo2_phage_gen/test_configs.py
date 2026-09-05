@@ -165,7 +165,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     validation_data = config["data"]["validation"]
 
     assert config["defaults"] == "grpo_phage_megatron.yaml"
-    assert config["checkpointing"]["save_optimizer"] is False
+    assert config["checkpointing"]["save_optimizer"] is True
     updates_per_epoch = 96 // config["grpo"]["num_prompts_per_step"]
     assert config["grpo"]["max_num_epochs"] * updates_per_epoch >= config["grpo"]["max_num_steps"]
     assert env_config["reward_output_mode"] == "gdpo"

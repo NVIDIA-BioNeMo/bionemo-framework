@@ -376,9 +376,9 @@ def test_dry_run(tmp_path: Path) -> None:
     full = next(command for command in gdpo_commands if "grpo.max_num_steps=3" not in command)
     assert "logger.log_dir=" + str(result_root / "rl-pilot-reload/logs") in reload
     assert "checkpointing.checkpoint_dir=" + str(result_root / "rl-pilot/checkpoints") in reload
-    assert "checkpointing.save_optimizer=false" in pilot
-    assert "checkpointing.save_optimizer=false" in reload
-    assert "checkpointing.save_optimizer=false" in full
+    assert "checkpointing.save_optimizer=true" in pilot
+    assert "checkpointing.save_optimizer=true" in reload
+    assert "checkpointing.save_optimizer=true" in full
     assert "command: python -m bionemo.evo2_phage_gen.rl_pilot_qualification" in log
     assert all("logger.wandb_enabled=false" in command for command in gdpo_commands)
     gdpo = pilot

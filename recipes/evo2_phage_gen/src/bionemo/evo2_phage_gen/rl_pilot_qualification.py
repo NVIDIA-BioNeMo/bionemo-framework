@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Validate the full-shape GDPO pilot's model-only restart and cache release."""
+"""Validate the full-shape GDPO pilot's checkpoint restart and cache release."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import torch
 import yaml
 
 
@@ -80,18 +81,17 @@ def validate_rl_pilot(
     runner_log: Path,
     reload_log: Path,
 ) -> dict[str, Any]:
-    """Validate one complete model-only checkpoint and a no-training reload process."""
+    """Validate one complete checkpoint and a no-training reload process."""
     checkpoint_root = checkpoint_root.resolve()
     checkpoint = checkpoint_root / f"step_{expected_step}"
     training_info = _load_mapping(checkpoint / "training_info.json", description="training state")
     if training_info.get("total_steps") != expected_step:
-        raise ValueError(
-            f"checkpoint total_steps is {training_info.get('total_steps')!r}, expected {expected_step}"
-        )
+        raise ValueError(f"checkpoint total_steps is {training_info.get('total_steps')!r}, expected {expected_step}")
 
     config = _load_mapping(checkpoint / "config.yaml", description="resolved checkpoint config")
-    if config.get("checkpointing", {}).get("save_optimizer") is not False:
-        raise ValueError("pilot checkpoint must set checkpointing.save_optimizer=false")
+    save_optimizer = config.get("checkpointing", {}).get("save_optimizer")
+    if not isinstance(save_optimizer, bool):
+        raise ValueError("pilot checkpoint must resolve checkpointing.save_optimizer to a boolean")
     cache_mode = (
         config.get("policy", {})
         .get("generation", {})
@@ -106,8 +106,19 @@ def validate_rl_pilot(
     if not (weights / ".metadata").is_file():
         raise ValueError(f"missing completed Megatron policy checkpoint metadata: {weights / '.metadata'}")
     optimizer = checkpoint / "policy/optimizer"
-    if optimizer.exists():
-        raise ValueError(f"model-only checkpoint unexpectedly contains optimizer state: {optimizer}")
+    common_pt = weights / "common.pt"
+    embedded_optimizer = False
+    if common_pt.is_file():
+        try:
+            common_state = torch.load(common_pt, map_location="cpu", weights_only=False)
+        except (OSError, RuntimeError, ValueError) as error:
+            raise ValueError(f"could not inspect Megatron common state: {common_pt}: {error}") from error
+        embedded_optimizer = isinstance(common_state, dict) and "optimizer" in common_state
+    optimizer_state_saved = optimizer.exists() or embedded_optimizer
+    if save_optimizer and not optimizer_state_saved:
+        raise ValueError("full-state checkpoint has no DTensor or embedded Megatron optimizer state")
+    if not save_optimizer and optimizer_state_saved:
+        raise ValueError("model-only checkpoint unexpectedly contains optimizer state")
 
     if not runner_log.is_file():
         raise ValueError(f"missing pilot runner log: {runner_log}")
@@ -118,10 +129,17 @@ def validate_rl_pilot(
     if not reload_log.is_file():
         raise ValueError(f"missing pilot reload log: {reload_log}")
     reload_text = reload_log.read_text(errors="replace")
-    if f"Optimizer state not found at {optimizer}" not in reload_text:
-        raise ValueError("reload did not resolve the expected model-only checkpoint")
-    if "Optimizer will be freshly initialized." not in reload_text:
-        raise ValueError("reload did not report fresh optimizer initialization")
+    fresh_optimizer = "Optimizer will be freshly initialized." in reload_text
+    if save_optimizer:
+        if fresh_optimizer:
+            raise ValueError("full-state reload discarded the saved optimizer state")
+    else:
+        if f"Optimizer state not found at {optimizer}" not in reload_text:
+            raise ValueError("reload did not resolve the expected model-only checkpoint")
+        if not fresh_optimizer:
+            raise ValueError("reload did not report fresh optimizer initialization")
+    if f"successfully loaded checkpoint from {weights}" not in reload_text:
+        raise ValueError("reload did not report loading the expected policy weights")
     if "Dataset swap detected" in reload_text:
         raise ValueError("reload rejected the saved dataloader state as a dataset swap")
     if _TRAINING_STEP_PATTERN.search(reload_text) or "Training Results:" in reload_text:
@@ -130,7 +148,8 @@ def validate_rl_pilot(
     return {
         "checkpoint": str(checkpoint),
         "restored_total_steps": expected_step,
-        "optimizer_reinitialized": True,
+        "optimizer_state_saved": optimizer_state_saved,
+        "optimizer_reinitialized": fresh_optimizer,
         "cache_release_observations": len(releases),
         "maximum_observed_cache_release_mib": max(releases),
     }
@@ -147,6 +166,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    """Validate the configured pilot artifacts and write an atomic summary."""
     args = _parser().parse_args()
     try:
         summary = validate_rl_pilot(

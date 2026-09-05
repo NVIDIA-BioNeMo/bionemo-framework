@@ -177,7 +177,9 @@ Persist-cache deployments need lifecycle-aware capacity qualification. Initial v
 about 12.55 GiB more allocated (152.25 versus 139.70 GiB)
 in early single-GB300 trials, and roughly 29.9 GiB of device-wide framebuffer use made their
 capacity failures inconclusive. A corrected `val_at_start=false`, offload-cache run at MBS32 then
-completed two full optimizer-resident rollout/update cycles despite that external baseline. On
+completed two full optimizer-resident rollout/update cycles despite that external baseline. A
+separate clean-device TP1 resume subsequently completed steps 11-13 at MBS32 with clean 256-row
+replay audits, resolving the earlier dirty-device failures as confounded rather than known-bad. On
 cycle two, `finish_generation` reduced PyTorch allocation from 202,501 to 75,431 MiB and device use
 from 243,653 to 114,613 MiB; replay over 921,250 active tokens had no masks, nonfinite values,
 large deltas, or page-phase elevation. This qualifies MBS32 only for that measured GB300 profile
@@ -187,12 +189,18 @@ transfer it to H100: start with training, reach optimizer steady state, run a sc
 and then complete a subsequent update on the deployed topology.
 Expandable segments fix fragmentation, not retained-state capacity.
 
-GDPO checkpoints are model-only by default. In a 7B TP1 qualification, full optimizer-state save
-exhausted global host memory after 20 otherwise healthy updates while MCore constructed sharded
-optimizer state; `save_optimizer=false` instead wrote the 13 GB checkpoint atomically in 15.06 s.
-The stage-40 pilot launches a separate process against its step-3 checkpoint and requires restored
-step, dataloader, and weights plus the expected fresh-Adam warning before full training. This is a
-usable recovery point, but reinitializing Adam means it is not a trajectory-identical resume.
+GDPO checkpoints preserve optimizer state by default. An earlier 7B TP1 failure at the first
+optimizer save was traced to an already-batched QC actor configured with `max_concurrency=1000`:
+it created 1,052 threads and retained roughly 4.5 GiB of host RSS per update, reaching about 108 GiB
+by step 20. The checkpoint allocation was the final trigger, not the leak. With
+`max_concurrency=1`, the actor remained near 16.3-17.6 GiB and 52 threads; a 74 GiB full-state
+checkpoint finalized atomically in 82.25 seconds, peak policy RSS was 286.1 GiB, at least 117.2 GiB
+of host memory remained available through overlap with the next rollout, and the next policy update
+completed. The stage-40 pilot launches a separate process against its step-3 checkpoint and requires
+restored step, dataloader, weights, and optimizer without a fresh-Adam warning before full training.
+If fixed-actor host capacity cannot support full state, explicitly set `save_optimizer=false`; the
+same check accepts that model-only recovery only with the expected fresh-Adam diagnostic and records
+that it is not trajectory-identical.
 
 Optimizer state is offloaded during generation by default. On a device with measured HBM capacity,
 `policy.generation.mcore_generation_config.generation_adapter_config.preserve_optimizer_state_during_generation=true`
