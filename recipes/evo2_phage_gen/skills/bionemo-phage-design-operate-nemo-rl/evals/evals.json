@@ -310,6 +310,20 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-024-post-validation-capacity",
+      "prompt": "Tune policy microbatch size for a full-shape Evo2 RL run. A prior pilot ran validation first, passed update one, and later OOMed; validation appears to retain roughly one model copy. Define a capacity pilot that distinguishes ordinary optimizer steady state from post-validation state.",
+      "expected_output": "Begin with training and require both optimizer steady state and a subsequent post-validation training update before selecting the deployed microbatch.",
+      "assertions": [
+        "The pilot sets val_at_start false rather than leading with validation.",
+        "It completes at least two full-shape optimizer updates so Adam state is materialized.",
+        "It schedules validation after training and then completes another optimizer update to expose retained validation state.",
+        "It tunes policy microbatch separately from rollout or packed-decode batch capacity.",
+        "It qualifies the actual deployed GPU topology and does not transfer a GB300 result to 8xH100 by assumption."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }

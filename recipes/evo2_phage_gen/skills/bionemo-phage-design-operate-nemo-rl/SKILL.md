@@ -22,10 +22,12 @@ Before the full run, execute a small full-shape preflight with positive and fail
 Retain the first sampled EOD and its log-probability in each row's policy trajectory, mask synthetic padding, and score biological sequence only before EOD. During top-k/top-p policy replay, keep every sampled action in normalized target-preserving support; never zero an `-inf` log-probability or drop its action, and retain generation-versus-replay mismatch telemetry. Size generation `max_model_len` to the longest tokenized prompt plus `max_new_tokens`, rounded to the allocator block boundary. Select paged-KV offset width from each view's reachable strided storage span; keep MCore's original append for spans at or below signed `INT32_MAX` and widen pointer operands before multiplication above it.
 
 Also guard the local GLU output span `train_micro_batch × sequence_length × ceil(ffn_width / TP)` below signed `INT32_MAX`; DP does not reduce that local shape. If native generation uses `offload` or `recompute`, verify the mode reaches MCore's `InferenceConfig`, deallocate after rollout, restore before reuse, and recapture graphs whenever restored cache/state pointers can change—a config value alone is not evidence that memory was released.
-Capacity qualification must complete at least two optimizer updates at full shape: optimizer state
-first materializes during the first update, so a one-update pass is not steady-state evidence.
-Expandable allocator segments can fix fragmentation but cannot compensate for retained cache or
-optimizer state.
+Capacity qualification must start with training rather than validation and complete at least two
+optimizer updates at full shape: optimizer state first materializes during the first update, so a
+one-update pass is not steady-state evidence. Because validation can allocate or capture persistent
+state, also complete a validation followed by another optimizer update before qualifying the
+setting. Expandable allocator segments can fix fragmentation but cannot compensate for retained
+cache or optimizer state.
 
 Do not qualify filtered sampling by silently masking mismatched rows. Compare every active sampled action's generation log-probability with a full teacher-forced policy replay using the exact prompt, completion, checkpoint, sampling transform, and EOD handling. Include both EOD-terminated and length-capped rows. Report per-token and per-sequence error before applying the configured mismatch guard, plus error grouped by absolute token position modulo the paged-KV block size. Any rejected row, non-finite value, or boundary-localized spike is a `diagnose` result even when the aggregate median is small. A lone finite, non-boundary per-token tail that leaves the configured per-sequence statistic accepted is an inspect-and-record advisory, not by itself an automatic hold: do not reuse a sequence-level threshold as a per-token kill switch. Escalate it when it recurs, clusters, changes the aggregate distribution, or crosses a separately calibrated hard per-token guard. Requalify across at least two complete generation→replay/refit cycles at the deployed batch shape, topology, precision, graph scope, page size, and KV-index dispatch; a smaller BF16/TP profile or a forward-only unit approximation does not qualify a different FP8/TP rollout profile.
 
