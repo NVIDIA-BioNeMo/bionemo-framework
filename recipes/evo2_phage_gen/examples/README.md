@@ -177,9 +177,10 @@ Persist-cache deployments need lifecycle-aware capacity qualification. Initial v
 about 12.55 GiB more allocated (152.25 versus 139.70 GiB)
 in early single-GB300 trials, and roughly 29.9 GiB of device-wide framebuffer use made their
 capacity failures inconclusive. A corrected `val_at_start=false`, offload-cache run at MBS32 then
-completed two full optimizer-resident rollout/update cycles despite that external baseline. A
-separate clean-device TP1 resume subsequently completed steps 11-13 at MBS32 with clean 256-row
-replay audits, resolving the earlier dirty-device failures as confounded rather than known-bad. On
+completed two full optimizer-resident rollout/update cycles despite that external baseline. The
+restarted TP1 production trajectory subsequently completed steps 11-13 at MBS32 with clean 256-row
+replay audits while still carrying roughly 42-44 GiB of external device use. This establishes MBS32
+for the corrected no-leading-validation/offload profile, but it is not a clean-device ceiling. On
 cycle two, `finish_generation` reduced PyTorch allocation from 202,501 to 75,431 MiB and device use
 from 243,653 to 114,613 MiB; replay over 921,250 active tokens had no masks, nonfinite values,
 large deltas, or page-phase elevation. This qualifies MBS32 only for that measured GB300 profile
