@@ -1,0 +1,10 @@
+# Dependencies for the evo2_megatron_quant recipe.
+#
+# Provided by the BioNeMo / nvcr.io PyTorch base image — do NOT re-pin these here,
+# re-pinning risks clashing with the container build:
+#   torch, transformer-engine, megatron-core, nemo-toolkit, bionemo-*,
+#   and nvidia-modelopt (vendored via NeMo; imported by src/quantize.py).
+#
+# Recipe-specific dependencies, pinned for reproducibility:
+pyyaml==6.0.2   # reads configs/quant_methods.yaml
+pytest==8.3.4   # CPU-only L0 sanity test (tests/test_compressed_linear_roundtrip.py)
