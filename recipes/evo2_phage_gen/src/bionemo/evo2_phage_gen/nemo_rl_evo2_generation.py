@@ -85,6 +85,8 @@ def _suspend_evo2_native_cache(native_dynamic: Any) -> None:
         return
 
     context.deallocate_inference_state_buffers()
+    if bool(getattr(context, "is_tensor_state_allocated", True)):
+        raise RuntimeError("Evo2 native inference state remained allocated after non-persistent cache release")
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     if getattr(native_dynamic, "cuda_graphs_enabled", False):

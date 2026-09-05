@@ -622,8 +622,9 @@ gpu_type='not queried (dry run)'
 if [[ "${DRY_RUN}" != "1" ]]; then
   export PATH="${RECIPE_ROOT}/data/external/bin:${PATH}"
   export CUDA_DEVICE_MAX_CONNECTIONS=1
-  # MBS32 reaches backward near the allocator ceiling; expandable segments avoid fragmentation
-  # without changing the biological sequence length or effective global batch.
+  # Expandable segments mitigate fragmentation, not steady-state capacity. The stage-40 pilot
+  # crosses two updates because Adam materializes after the first; MBS32 also relies on releasing
+  # the non-persistent native cache before policy training.
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   export NCCL_GRAPH_REGISTER=0
   if ! gpu_info="$(nvidia-smi --query-gpu=name --format=csv,noheader)"; then
@@ -937,12 +938,12 @@ stage_40() {
       evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${rl_checkpoint}" \
       --prompt-data "${rl}/train.jsonl" --gpus-per-node "${NUM_GPUS}" \
       --control-fasta "${control}/reference-rotations.fasta" --control-dir "${control}"
-    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.max_model_len="${RL_MAX_MODEL_LEN}" policy.generation.mcore_generation_config.max_requests="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.prompt_batch_size="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
+    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.max_model_len="${RL_MAX_MODEL_LEN}" policy.generation.mcore_generation_config.max_requests="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.prompt_batch_size="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.kv_cache_management_mode=offload policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
     note "RL native packed mixed-length decode group size: ${RL_PROMPT_BATCH_SIZE}; generation context ceiling: ${RL_MAX_MODEL_LEN}"
     if [[ -f "${STAGE_DIR}/40-pilot.done" ]]; then
       note 'substage 40-pilot already complete'
     else
-      monitored 'one-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" logger.wandb_enabled=false checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=1 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
+      monitored 'two-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" logger.wandb_enabled=false checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=2 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
       [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-pilot.done"
     fi
     if [[ -f "${STAGE_DIR}/40-pilot-check.done" ]]; then

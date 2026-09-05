@@ -149,7 +149,9 @@ post-EOD physical samples from biological QC. Filtered policy replay also keeps 
 in a normalized target-preserving support; generation-versus-replay error telemetry remains enabled.
 
 The policy defaults to global batch 256, training microbatch 32, validation 96, and
-`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. For Evo2 7B at TP1, the largest local GLU output
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. The standard pilot runs two optimizer updates:
+Adam state first materializes during update one, so a one-update pass does not establish
+steady-state capacity. For Evo2 7B at TP1, the largest local GLU output
 is `32 × 5,632 × 11,008 = 1,983,905,792` elements, just below signed-int32 indexing; the launcher
 rejects larger resolved shapes before worker allocation. TP2 halves the local FFN width and DP only
 distributes the global batch, so neither replaces a full-shape memory and replay qualification on
@@ -157,9 +159,13 @@ the deployed H100 topology. Keep `logprob_batch_size=1` as the conservative inde
 
 `RL_PROMPT_BATCH_SIZE` controls the packed decode group size (default 32, the DP8-local share of the
 256-rollout global batch); set a larger value only on a qualified device profile with enough cache
-capacity. The default offloads paged-KV and Hyena state before policy training, then restores them
+capacity. MBS32 is paired with explicit cache offload in this 8×H100 launcher. The adapter
+deallocates paged-KV and Hyena state before policy training, then restores them
 and recaptures graph runners because their buffer addresses changed. Non-persistent cache settings
-must reach MCore's `InferenceConfig`; a config-only value that leaves buffers resident is ineffective.
+must reach MCore's `InferenceConfig`, and a release that leaves tensor state allocated fails rather
+than proceeding toward a later OOM. Persist-cache deployments need their own two-update capacity
+qualification and may require a smaller policy microbatch; expandable segments fix fragmentation,
+not retained-state capacity.
 Optimizer state is offloaded during generation by default. On a device with measured HBM capacity,
 `policy.generation.mcore_generation_config.generation_adapter_config.preserve_optimizer_state_during_generation=true`
 avoids that per-step CPU round trip while still offloading gradients. Qualify it in a disposable
@@ -200,7 +206,7 @@ inapplicability remains candidate-level `INDETERMINATE`, not a safety `PASS`.
 | 10    | Safety-screen inputs and build leakage-controlled SFT splits                                |
 | 20    | Train, select, and evaluate SFT                                                             |
 | 30    | Calibrate generation and materialize RL prompt banks                                        |
-| 40    | Prepare the model-only SFT checkpoint, run the pilot/check, train GDPO, and select RL       |
+| 40    | Prepare the model-only SFT checkpoint, run the two-update pilot/check, train GDPO, and select RL |
 | 50    | Generate, SFT-score, deduplicate, safety-screen, hard-QC, cluster, and report 1,000 genomes |
 
 The result root is the computational notebook. `RUNLOG.md` records commands and liveness;

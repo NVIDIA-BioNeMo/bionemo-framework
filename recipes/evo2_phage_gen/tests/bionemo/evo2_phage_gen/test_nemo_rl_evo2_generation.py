@@ -585,6 +585,26 @@ def test_finish_generation_reuses_native_engine_across_cache_lifecycle(monkeypat
         assert graph_reset_count == 2
 
 
+def test_nonpersistent_cache_release_fails_when_context_remains_allocated():
+    class _Context:
+        is_tensor_state_allocated = True
+
+        def reset(self):
+            pass
+
+        def deallocate_inference_state_buffers(self):
+            pass
+
+    native_dynamic = SimpleNamespace(
+        shared_dyn_ctx=_Context(),
+        kv_cache_management_mode="offload",
+        cuda_graphs_enabled=False,
+    )
+
+    with pytest.raises(RuntimeError, match="remained allocated"):
+        evo2_generation._suspend_evo2_native_cache(native_dynamic)
+
+
 def test_nemo_worker_bypasses_generic_engine_for_evo2_adapter(monkeypatch):
     from nemo_rl.models.generation.megatron import megatron_worker
 

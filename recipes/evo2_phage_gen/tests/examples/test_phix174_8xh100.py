@@ -351,7 +351,7 @@ def test_dry_run(tmp_path: Path) -> None:
     assert rl_control[rl_control.index("--checkpoint") + 1] == "<rl-sft-checkpoint>"
     preparation = log.index("command: python -m bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl")
     assert preparation < log.index("command: evo2_phage_check_rl")
-    assert log.index("monitor: RL environment control") < log.index("monitor: one-step GDPO pilot")
+    assert log.index("monitor: RL environment control") < log.index("monitor: two-step GDPO pilot")
 
     likelihood_command = next(
         shlex.split(line.partition("command: ")[2])
@@ -375,6 +375,7 @@ def test_dry_run(tmp_path: Path) -> None:
     assert "policy.generation.mcore_generation_config.max_model_len=5632" in gdpo
     assert "policy.generation.mcore_generation_config.max_requests=32" in gdpo
     assert "policy.generation.mcore_generation_config.prompt_batch_size=32" in gdpo
+    assert "policy.generation.mcore_generation_config.kv_cache_management_mode=offload" in gdpo
     assert "RL native packed mixed-length decode group size: 32" in log
 
     rollout_commands = [
@@ -489,7 +490,7 @@ def test_wandb_dry_run(tmp_path: Path) -> None:
 
     gdpo_commands = [command for command in commands if command[:1] == ["evo2_phage_run_gdpo"]]
     assert len(gdpo_commands) == 2
-    pilot = next(command for command in gdpo_commands if "grpo.max_num_steps=1" in command)
+    pilot = next(command for command in gdpo_commands if "grpo.max_num_steps=2" in command)
     full_gdpo = next(command for command in gdpo_commands if command is not pilot)
     assert "logger.wandb_enabled=false" in pilot
     assert not any(part.startswith("logger.wandb.project=") for part in pilot)
@@ -972,7 +973,7 @@ def test_substage_resume(tmp_path: Path) -> None:
     assert "evo2_phage_generation write-prompts" not in log
     assert "--max-new-tokens 5450" not in log
     assert "monitor: selected-SFT likelihood scoring" in log
-    assert "monitor: one-step GDPO pilot" not in log
+    assert "monitor: two-step GDPO pilot" not in log
     assert "monitor: 500-step DP8 GDPO" not in log
     assert "evo2_phage_monitor_objectives" in log
     assert "evo2_phage_sequence_safety scan" in log
@@ -1117,7 +1118,7 @@ def test_stage40_pilot_marker_skips_pilot_but_runs_monitor_and_full_training(tmp
     assert completed.returncode == 0, completed.stderr
     log = (result_root / "RUNLOG.md").read_text()
     assert "substage 40-pilot already complete" in log
-    assert "monitor: one-step GDPO pilot" not in log
+    assert "monitor: two-step GDPO pilot" not in log
     assert "evo2_phage_monitor_objectives" in log
     assert "monitor: 500-step DP8 GDPO" in log
 

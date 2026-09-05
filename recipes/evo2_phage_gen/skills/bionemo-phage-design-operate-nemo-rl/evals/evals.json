@@ -305,7 +305,7 @@
         "The response verifies that the configured mode reaches MCore's InferenceConfig rather than trusting the YAML value.",
         "It deallocates native paged-KV and recurrent state after generation and restores them before the next rollout.",
         "It invalidates and recaptures CUDA graphs when restored cache or recurrent-state addresses may change.",
-        "It tests at least two rollout-to-training-to-rollout cycles and confirms memory release plus generation-to-replay agreement.",
+        "It tests at least two full optimizer updates so the second cycle includes materialized optimizer state, and confirms memory release plus generation-to-replay agreement.",
         "It does not shorten the genome, crop prompts, or weaken biological QC to avoid the memory failure."
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
