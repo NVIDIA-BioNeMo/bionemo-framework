@@ -504,7 +504,7 @@ def test_wandb_dry_run(tmp_path: Path) -> None:
     assert "logger.wandb_enabled=true" in full_gdpo
     assert "logger.wandb.project=custom-gdpo" in full_gdpo
     assert "logger.wandb.name=wandb-result-7b-base-gdpo" in full_gdpo
-    assert "logger.wandb.entity=example-team" in full_gdpo
+    assert "+logger.wandb.entity=example-team" in full_gdpo
 
 
 def test_single_gpu_plan(tmp_path: Path) -> None:

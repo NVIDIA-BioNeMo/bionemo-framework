@@ -222,7 +222,7 @@ if [[ "${WANDB_ENABLED}" == "1" ]]; then
     logger.wandb.name="${WANDB_RL_RUN_NAME}"
   )
   if [[ -n "${WANDB_ENTITY_NAME}" ]]; then
-    RL_WANDB_ARGS+=(logger.wandb.entity="${WANDB_ENTITY_NAME}")
+    RL_WANDB_ARGS+=(+logger.wandb.entity="${WANDB_ENTITY_NAME}")
   fi
 fi
 
