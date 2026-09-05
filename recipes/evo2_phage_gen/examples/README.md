@@ -135,10 +135,10 @@ an unseeded route into the A/A*/B cluster; `origin` retains the canonical contex
 short origin-spanning segment shared by those three ORFs. This rotation strategy does not apply to
 a linear genome, whose biological endpoints must be preserved.
 
-Each 96-rollout GDPO update uses 16 prompt records × 6 generations. With DP8, each 12-request decode
-batch contains two prompt records, while the global update contains all eight anchor×length strata:
-two prompt records and 12 generated sequences per stratum. Validation independently contains the
-same mixture. The 1,000-design final rollout uses 125 prompts per stratum: two 500-record,
+Each 256-rollout GDPO update uses 16 prompt records × 16 generations. With DP8, each 32-request
+decode batch contains two prompt records, while the global update contains all eight anchor×length
+strata: two prompt records and 32 generated sequences per stratum. Validation remains a separate
+96-record mixture. The 1,000-design final rollout uses 125 prompts per stratum: two 500-record,
 same-length files alternate four anchors and combine to exactly 1,000 records.
 
 The launcher sets `max_model_len` to the smallest 256-token boundary covering the longest selected
@@ -148,8 +148,18 @@ first sampled EOD and its log-probability, mask only synthetic padding, and excl
 post-EOD physical samples from biological QC. Filtered policy replay also keeps each sampled action
 in a normalized target-preserving support; generation-versus-replay error telemetry remains enabled.
 
-`RL_PROMPT_BATCH_SIZE` controls the packed mixed-length decode group size (default 12); set a larger
-value only on a qualified device profile that has enough memory for the corresponding cache.
+The policy defaults to global batch 256, training microbatch 32, validation 96, and
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. For Evo2 7B at TP1, the largest local GLU output
+is `32 × 5,632 × 11,008 = 1,983,905,792` elements, just below signed-int32 indexing; the launcher
+rejects larger resolved shapes before worker allocation. TP2 halves the local FFN width and DP only
+distributes the global batch, so neither replaces a full-shape memory and replay qualification on
+the deployed H100 topology. Keep `logprob_batch_size=1` as the conservative independent setting.
+
+`RL_PROMPT_BATCH_SIZE` controls the packed decode group size (default 32, the DP8-local share of the
+256-rollout global batch); set a larger value only on a qualified device profile with enough cache
+capacity. The default offloads paged-KV and Hyena state before policy training, then restores them
+and recaptures graph runners because their buffer addresses changed. Non-persistent cache settings
+must reach MCore's `InferenceConfig`; a config-only value that leaves buffers resident is ineffective.
 Optimizer state is offloaded during generation by default. On a device with measured HBM capacity,
 `policy.generation.mcore_generation_config.generation_adapter_config.preserve_optimizer_state_during_generation=true`
 avoids that per-step CPU round trip while still offloading gradients. Qualify it in a disposable
@@ -207,8 +217,9 @@ ordered by mean per-nucleotide likelihood under the selected SFT model. Mixed-or
 generation order because whole-sequence language-model likelihood depends on the linearized origin;
 the scores remain recorded as diagnostics.
 The final rollout and the inner GDPO rollout both use packed dynamic prefill and batched recurrent
-decode for medium/long generation. GDPO assigns 12 requests to each of eight data-parallel replicas
-for its 96-sequence step and requires exact-length, EOS-suppressed completions. Final selected-SFT
+decode for medium/long generation. GDPO assigns 32 requests to each of eight data-parallel replicas
+for its 256-sequence step and retains sampled EOD actions so the length reward can teach termination.
+Final selected-SFT
 likelihood uses packed prediction for ragged batches while preserving FASTA record mappings. NeMo-RL's
 separate `policy.sequence_packing` option remains disabled until its gradient-bearing loss/backward
 path is independently qualified; it does not control rollout packing.

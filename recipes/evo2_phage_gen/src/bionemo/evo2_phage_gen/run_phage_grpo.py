@@ -33,6 +33,50 @@ PAPER_RL_PROMPT_FILENAMES = {
     "phage_prompts_paper_useful_rl.jsonl",
     "phage_prompts_paper_useful_rl_validation_prompt10_96.jsonl",
 }
+_SIGNED_INT32_MAX = 2**31 - 1
+
+
+def _validate_glu_index_span(
+    *,
+    train_micro_batch_size: int,
+    sequence_length: int,
+    ffn_hidden_size: int,
+    tensor_model_parallel_size: int,
+) -> int:
+    """Reject local GLU output shapes that exceed signed-int32 kernel indexing."""
+    if min(train_micro_batch_size, sequence_length, ffn_hidden_size, tensor_model_parallel_size) < 1:
+        raise ValueError("GLU index-span inputs must all be positive integers")
+    local_ffn_width = (ffn_hidden_size + tensor_model_parallel_size - 1) // tensor_model_parallel_size
+    output_elements = train_micro_batch_size * sequence_length * local_ffn_width
+    if output_elements > _SIGNED_INT32_MAX:
+        raise ValueError(
+            "The local GLU output exceeds signed-int32 indexing: "
+            f"micro_batch={train_micro_batch_size} * sequence_length={sequence_length} * "
+            f"local_ffn_width={local_ffn_width} = {output_elements:,} elements > {_SIGNED_INT32_MAX:,}. "
+            "Reduce train_micro_batch_size or increase tensor model parallelism, then validate memory empirically."
+        )
+    return output_elements
+
+
+def _validate_evo2_training_shape(config) -> int:
+    """Validate the resolved Evo2 training shape before allocating distributed workers."""
+    from bionemo.evo2.models.evo2_provider import HYENA_MODEL_OPTIONS
+
+    model_key = str(OmegaConf.select(config, "policy.model_name")).rsplit("/", 1)[-1]
+    try:
+        provider_type = HYENA_MODEL_OPTIONS[model_key]
+    except KeyError as exc:
+        raise ValueError(f"Unknown Evo2 model_name {model_key!r}; cannot validate its local GLU shape") from exc
+    ffn_hidden_size = int(provider_type.__dataclass_fields__["ffn_hidden_size"].default)
+    sequence_length = OmegaConf.select(config, "policy.max_total_sequence_length")
+    if sequence_length is None:
+        sequence_length = OmegaConf.select(config, "policy.generation.mcore_generation_config.max_model_len")
+    return _validate_glu_index_span(
+        train_micro_batch_size=int(OmegaConf.select(config, "policy.train_micro_batch_size")),
+        sequence_length=int(sequence_length),
+        ffn_hidden_size=ffn_hidden_size,
+        tensor_model_parallel_size=int(OmegaConf.select(config, "policy.megatron_cfg.tensor_model_parallel_size")),
+    )
 
 
 def _parse_args(default_config: str, default_algorithm: str) -> tuple[argparse.Namespace, list[str]]:
@@ -173,6 +217,8 @@ def main(default_config: str = "configs/grpo_phage_megatron.yaml", default_algor
         config = parse_hydra_overrides(config, overrides)
     config, algorithm = _apply_algorithm_override(config, args.algorithm)
     _ensure_prompt_data_files(config)
+    local_glu_elements = _validate_evo2_training_shape(config)
+    logger.info("Validated local GLU output span: %s elements", f"{local_glu_elements:,}")
     logger.info("Using RL algorithm frontend: %s", algorithm.upper())
 
     config = MasterConfig(**OmegaConf.to_container(config, resolve=True))

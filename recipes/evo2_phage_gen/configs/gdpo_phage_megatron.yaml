@@ -18,10 +18,11 @@ checkpointing:
 
 grpo:
   max_num_epochs: 500
-  # Each 12-request DP decode batch sees two prompt records; the full 96-rollout
-  # update covers all eight anchor-by-length strata with 12 generations each.
+  # Sixteen prompt records cover two examples from each anchor-by-length stratum.
+  # Sixteen generations per prompt make a 256-rollout global update; on DP8 each
+  # H100 receives one packed 32-request generation wave.
   num_prompts_per_step: 16
-  num_generations_per_prompt: 6
+  num_generations_per_prompt: 16
   max_num_steps: 500
   val_period: 10
   val_batch_size: 96
@@ -47,9 +48,12 @@ loss_fn:
   token_level_loss: false
 
 policy:
-  train_global_batch_size: 96
-  train_micro_batch_size: 1
-  generation_batch_size: 96
+  max_total_sequence_length: 5632
+  train_global_batch_size: 256
+  # Evo2 7B has local GLU span 32 * 5632 * 11008 = 1,983,905,792 elements at TP1,
+  # just below signed-int32 kernel indexing. TP2 halves local FFN width; DP does not.
+  train_micro_batch_size: 32
+  generation_batch_size: 256
   logprob_batch_size: 1
   megatron_cfg:
     tensor_model_parallel_size: 1
@@ -64,8 +68,11 @@ policy:
     top_p: 0.999
     top_k: 5
     mcore_generation_config:
-      max_requests: 12
-      prompt_batch_size: 12
+      max_requests: 32
+      prompt_batch_size: 32
+      # Free the native paged-KV and packed Hyena state before policy training. Restoring these
+      # buffers changes their addresses, so the adapter recaptures and verifies decode graphs.
+      kv_cache_management_mode: "offload"
       cuda_graph_impl: "local"
       inference_cuda_graph_scope: "block"
       use_cuda_graphs_for_non_decode_steps: true
@@ -192,7 +199,7 @@ env:
       lovis4u_mmseqs_threads: 8
       lovis4u_collect_pdfs: false
     sequence_safety:
-      batch_size: 128
+      batch_size: 256
       orf_workers: 32
       threads: 32
       phrogs_threads: 64

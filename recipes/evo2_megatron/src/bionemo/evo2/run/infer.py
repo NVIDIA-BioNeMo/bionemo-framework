@@ -100,6 +100,7 @@ from megatron.bridge.training.utils.checkpoint_utils import (
 from megatron.bridge.utils.common_utils import get_rank_safe, get_world_size_safe
 from megatron.bridge.utils.instantiate_utils import instantiate
 from megatron.core import dist_checkpointing, parallel_state
+from megatron.core.inference.config import InferenceConfig, KVCacheManagementMode
 from megatron.core.inference.sampling_params import SamplingParams
 from megatron.core.transformer.enums import InferenceCudaGraphScope
 from megatron.core.transformer.module import Float16Module
@@ -389,6 +390,7 @@ class Evo2NativeDynamicComponents:
     cuda_graph_scope: str
     precision_kind: str
     precision_parameter_storage: str
+    kv_cache_management_mode: str = "persist"
     # MCore's training/inference toggle removes ``cudagraph_manager`` attributes while graphs are
     # disabled. Keep the exact module/manager pairs owned by this persistent inference engine so
     # the next rollout can restore them without discarding captured runners or their storage.
@@ -407,8 +409,8 @@ class Evo2NativeDynamicComponents:
     # MCore wrapper used only when pipeline parallelism is active. It is bound lazily to the
     # current dynamic context because that context may be rebuilt when its capacity grows.
     inference_wrapper: Optional[Any] = None
-    # Persistent dynamic context, built lazily on the first generate() call and reused across all
-    # subsequent calls so the per-layer CUDA graphs (captured once during warmup) stay valid. Keyed
+    # Shared dynamic context, built lazily and reused across calls. Persistent cache mode retains
+    # graph-bound buffers; non-persistent modes restore the buffers and recapture as needed. Keyed
     # by the context-affecting generate() options so it is rebuilt only if those change.
     shared_dyn_ctx: Optional[Any] = None
     shared_dyn_ctx_key: Optional[tuple] = None
@@ -564,6 +566,7 @@ def _setup_native_dynamic_components(
     cuda_graph_scope: Optional[str] = None,
     precision_kind: Optional[str] = None,
     precision_parameter_storage: Optional[str] = None,
+    kv_cache_management_mode: str = "persist",
 ) -> Evo2NativeDynamicComponents:
     """Prepare the standalone HyenaModel to decode on an Evo2 dynamic context.
 
@@ -571,8 +574,18 @@ def _setup_native_dynamic_components(
     ``DynamicInferenceContext`` subclass, and creates the Mamba state config that lets mcore
     allocate Hyena recurrent state in its dynamic state buffers. A single dynamic context is built
     lazily in :func:`_generate_native_dynamic`, sized to the longest prompt plus the requested
-    generation length, and reused (reset) across prompts so CUDA-graph capture stays valid.
+    generation length, and reused (reset) across prompts. Non-persistent cache lifecycles may
+    require graph recapture when the context's buffer addresses change.
     """
+    try:
+        normalized_cache_mode = KVCacheManagementMode(
+            str(getattr(kv_cache_management_mode, "value", kv_cache_management_mode)).lower()
+        )
+    except ValueError as exc:
+        supported_modes = ", ".join(mode.value for mode in KVCacheManagementMode)
+        raise ValueError(
+            f"Unsupported KV cache management mode {kv_cache_management_mode!r}; expected one of {supported_modes}"
+        ) from exc
     rank = int(os.environ.get("RANK", "0"))
     hyena_model = _unwrap_hyena_model(model)
 
@@ -614,10 +627,11 @@ def _setup_native_dynamic_components(
     if rank == 0:
         logger.info(
             "[evo2-native] standalone evo2 prepared for native dynamic decode "
-            "(SP off, cuda_graphs=%s, graph_managers=%d, modal_pole_caches=%d).",
+            "(SP off, cuda_graphs=%s, graph_managers=%d, modal_pole_caches=%d, kv_cache=%s).",
             cuda_graphs_enabled,
             cuda_graph_manager_count,
             warmed_modal_layers,
+            normalized_cache_mode.value,
         )
     return Evo2NativeDynamicComponents(
         ctx_cls=ctx_cls,
@@ -631,6 +645,7 @@ def _setup_native_dynamic_components(
         cuda_graph_scope=str(cuda_graph_scope),
         precision_kind=str(precision_kind),
         precision_parameter_storage=str(precision_parameter_storage),
+        kv_cache_management_mode=normalized_cache_mode.value,
         cuda_graph_manager_bindings=_cuda_graph_manager_bindings(hyena_model),
         max_seq_length_is_auto=max_seq_length is None,
     )
@@ -1755,10 +1770,19 @@ def _reset_layer_cuda_graphs(nd: Evo2NativeDynamicComponents) -> None:
     names defensively; with the global ``cudagraph_created`` flag also reset, the next decode creates a
     fresh runner and captures at the current shape.
     """
-    for module in nd.hyena_model.modules():
-        mgr = getattr(module, "cudagraph_manager", None)
-        if mgr is None:
+    managers = [
+        manager
+        for module in nd.hyena_model.modules()
+        if (manager := getattr(module, "cudagraph_manager", None)) is not None
+    ]
+    # NeMo-RL disables graph mode before the adapter's finish hook, removing manager attributes.
+    # Retained bindings still own the runners whose cache-buffer pointers must be invalidated.
+    managers.extend(manager for _module, manager in getattr(nd, "cuda_graph_manager_bindings", ()))
+    seen_manager_ids: set[int] = set()
+    for mgr in managers:
+        if id(mgr) in seen_manager_ids:
             continue
+        seen_manager_ids.add(id(mgr))
         if hasattr(mgr, "cudagraph_runners"):
             mgr.cudagraph_runners = []
         for lookup_name in ("custom_cudagraphs_lookup_table", "inference_cudagraphs_lookup_table"):
@@ -1785,25 +1809,27 @@ def _get_or_build_shared_dynamic_context(
     cuda_graph_request_counts: Optional[Collection[int]] = None,
     device: torch.device,
 ) -> tuple[Any, _CudaPhaseStats, _CudaPhaseStats]:
-    """Return the engine's persistent dynamic context, building (and graph-warming) it on first use.
+    """Return the engine's shared dynamic context, building (and graph-warming) it on first use.
 
     A single context is reused for the whole engine lifetime so the per-layer CUDA graphs captured
-    during warmup stay valid across every prompt and every :func:`generate` call (mcore keys decode
-    graphs by the context object plus a ``rotary_pos_emb`` tensor whose length equals
-    ``max_sequence_length``, so both must stay constant). This mirrors mcore's
-    ``DynamicInferenceEngine``, which holds one context and feeds many requests through it.
+    during warmup can serve every prompt while their backing buffer addresses stay stable (mcore
+    keys decode graphs by the context object plus a ``rotary_pos_emb`` tensor whose length equals
+    ``max_sequence_length``). Non-persistent cache modes invalidate and recapture runners after a
+    buffer reallocation. This mirrors mcore's ``DynamicInferenceEngine``, which holds one context
+    and feeds many requests through it.
 
     It is rebuilt only when (a) the context-affecting options change, or (b) the engine budget
     ``nd.max_seq_length`` has grown beyond the cached context (auto mode grows on demand). mcore has
     no in-place resize, so "grow" means building a new, larger context; any graphs captured against
     the old one are dropped first via :func:`_reset_layer_cuda_graphs` and re-captured by the warmup.
     """
-    from megatron.core.inference.config import InferenceConfig
-
+    configured_cache_mode = getattr(nd, "kv_cache_management_mode", "persist")
+    cache_mode = KVCacheManagementMode(str(getattr(configured_cache_mode, "value", configured_cache_mode)).lower())
     ctx_key = (
         int(block_size_tokens),
         None if max_tokens is None else int(max_tokens),
         bool(enable_chunked_prefill),
+        cache_mode.value,
     )
     cached = nd.shared_dyn_ctx
     requested_graph_counts = frozenset(int(count) for count in (cuda_graph_request_counts or (max_active_requests,)))
@@ -1877,6 +1903,7 @@ def _get_or_build_shared_dynamic_context(
             enable_chunked_prefill=enable_chunked_prefill,
             num_cuda_graphs=1 if nd.cuda_graphs_enabled else None,
             use_cuda_graphs_for_non_decode_steps=False,
+            kv_cache_management_mode=cache_mode,
         ),
     )
     dyn_ctx.materialize_only_last_token_logits = True

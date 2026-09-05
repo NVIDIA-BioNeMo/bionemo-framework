@@ -156,12 +156,10 @@ def test_write_rl_prompt_bank_balances_anchor_and_length_in_each_update(tmp_path
     }
     for start in range(0, len(records), 16):
         update = strata[start : start + 16]
-        assert {stratum: update.count(stratum) for stratum in set(update)} == {
-            stratum: 2 for stratum in set(strata)
-        }
-        expanded = [stratum for stratum in update for _ in range(6)]
+        assert {stratum: update.count(stratum) for stratum in set(update)} == {stratum: 2 for stratum in set(strata)}
+        expanded = [stratum for stratum in update for _ in range(16)]
         assert {stratum: expanded.count(stratum) for stratum in set(expanded)} == {
-            stratum: 12 for stratum in set(strata)
+            stratum: 32 for stratum in set(strata)
         }
 
 
@@ -174,8 +172,8 @@ def test_rl_repeat_and_dp_chunk_shape_mixes_anchors_locally_and_lengths_globally
         reference_sequence="AAAACCCCGGGGTTTT",
     )
     records = [json.loads(line) for line in output.read_text().splitlines()]
-    expanded = [record for record in records for _ in range(6)]
-    dp_chunks = [expanded[start : start + 12] for start in range(0, 96, 12)]
+    expanded = [record for record in records for _ in range(16)]
+    dp_chunks = [expanded[start : start + 32] for start in range(0, 256, 32)]
 
     assert len({row["messages"][0]["content"] for row in expanded}) == 4
     for chunk in dp_chunks:

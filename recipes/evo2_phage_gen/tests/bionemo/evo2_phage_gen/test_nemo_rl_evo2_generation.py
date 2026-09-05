@@ -477,18 +477,48 @@ def test_evo2_adapter_emits_replicated_batched_data_from_every_model_parallel_ra
         adapter.generate_worker(worker, data=data, greedy=False)
 
 
-def test_finish_generation_keeps_native_engine_across_rollout_cycles(monkeypatch):
+@pytest.mark.parametrize("cache_mode", ["persist", "offload", "recompute"])
+def test_finish_generation_reuses_native_engine_across_cache_lifecycle(monkeypatch, cache_mode):
     adapter = Evo2MegatronGenerationAdapter({"seed": 17})
     assert adapter.bypasses_persistent_mcore_engine is True
-    context = SimpleNamespace(reset_count=0)
-    context.reset = lambda: setattr(context, "reset_count", context.reset_count + 1)
+
+    class _Context:
+        def __init__(self):
+            self.is_tensor_state_allocated = True
+            self.reset_count = 0
+            self.deallocate_count = 0
+            self.reinitialize_count = 0
+
+        def reset(self):
+            self.reset_count += 1
+
+        def deallocate_inference_state_buffers(self):
+            assert self.is_tensor_state_allocated
+            self.is_tensor_state_allocated = False
+            self.deallocate_count += 1
+
+        def reinitialize_inference_state_buffers(self):
+            assert not self.is_tensor_state_allocated
+            self.is_tensor_state_allocated = True
+            self.reinitialize_count += 1
+
+    context = _Context()
     model = SimpleNamespace()
     native_dynamic = SimpleNamespace(
         forward_model=model,
         shared_dyn_ctx=context,
         evo2_seed=0,
         sampling_rng=None,
+        kv_cache_management_mode=cache_mode,
+        cuda_graphs_enabled=True,
     )
+    graph_reset_count = 0
+
+    def _reset_graphs(_native_dynamic):
+        nonlocal graph_reset_count
+        graph_reset_count += 1
+
+    monkeypatch.setattr("bionemo.evo2.run.infer._reset_layer_cuda_graphs", _reset_graphs)
     worker = SimpleNamespace(
         cfg={
             "megatron_cfg": {"tensor_model_parallel_size": 1},
@@ -497,6 +527,7 @@ def test_finish_generation_keeps_native_engine_across_rollout_cycles(monkeypatch
                     "max_model_len": 64,
                     "cuda_graph_impl": "local",
                     "prompt_batch_size": 2,
+                    "kv_cache_management_mode": cache_mode,
                 }
             },
         },
@@ -509,6 +540,7 @@ def test_finish_generation_keeps_native_engine_across_rollout_cycles(monkeypatch
     sampling_params = [SimpleNamespace(num_tokens_to_generate=1)] * 2
 
     def _fake_generate(_components, prompts, **_kwargs):
+        assert context.is_tensor_state_allocated
         return [
             SimpleNamespace(
                 prompt_tokens=[token_id],
@@ -541,6 +573,16 @@ def test_finish_generation_keeps_native_engine_across_rollout_cycles(monkeypatch
 
     assert worker._evo2_native_dynamic_components is native_dynamic
     assert context.reset_count == 2
+    if cache_mode == "persist":
+        assert context.deallocate_count == 0
+        assert context.reinitialize_count == 0
+        assert context.is_tensor_state_allocated
+        assert graph_reset_count == 0
+    else:
+        assert context.deallocate_count == 2
+        assert context.reinitialize_count == 1
+        assert not context.is_tensor_state_allocated
+        assert graph_reset_count == 2
 
 
 def test_nemo_worker_bypasses_generic_engine_for_evo2_adapter(monkeypatch):
@@ -967,7 +1009,12 @@ def test_adapter_resolves_quantized_graph_scope_before_setup(monkeypatch, fp8, f
     prompt_lengths = torch.tensor([2, 2])
     sampling_params = [SimpleNamespace(num_tokens_to_generate=2, top_k=5, top_p=0.999)] * 2
     setup_kwargs = {}
-    native_dynamic = SimpleNamespace(forward_model=object(), evo2_seed=0, sampling_rng=None)
+    native_dynamic = SimpleNamespace(
+        forward_model=object(),
+        evo2_seed=0,
+        sampling_rng=None,
+        kv_cache_management_mode="offload",
+    )
     worker = SimpleNamespace(
         cfg={
             "generation": {
@@ -976,6 +1023,7 @@ def test_adapter_resolves_quantized_graph_scope_before_setup(monkeypatch, fp8, f
                     "prompt_batch_size": 2,
                     "cuda_graph_impl": "local",
                     "inference_cuda_graph_scope": "block",
+                    "kv_cache_management_mode": "offload",
                 }
             }
         },
@@ -1011,6 +1059,7 @@ def test_adapter_resolves_quantized_graph_scope_before_setup(monkeypatch, fp8, f
 
     assert setup_kwargs["cuda_graphs_enabled"] is True
     assert setup_kwargs["cuda_graph_scope"] == expected_scope
+    assert setup_kwargs["kv_cache_management_mode"] == "offload"
 
 
 def test_megatron_generation_shards_adapter_input_across_dp_and_gathers_in_order():

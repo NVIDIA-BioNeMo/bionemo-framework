@@ -64,6 +64,38 @@ def _reseed_evo2_native_dynamic(native_dynamic: Any, seed: int) -> None:
     native_dynamic.sampling_rng = None
 
 
+def _resume_evo2_native_cache(native_dynamic: Any) -> None:
+    """Restore non-persistent native inference buffers before the next rollout."""
+    context = getattr(native_dynamic, "shared_dyn_ctx", None)
+    if context is None or bool(getattr(context, "is_tensor_state_allocated", True)):
+        return
+    context.reinitialize_inference_state_buffers()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _suspend_evo2_native_cache(native_dynamic: Any) -> None:
+    """Release non-persistent native inference buffers after a rollout."""
+    context = getattr(native_dynamic, "shared_dyn_ctx", None)
+    if context is None:
+        return
+    context.reset()
+    cache_mode = str(getattr(native_dynamic, "kv_cache_management_mode", "persist")).lower()
+    if cache_mode == "persist" or not bool(getattr(context, "is_tensor_state_allocated", True)):
+        return
+
+    context.deallocate_inference_state_buffers()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    if getattr(native_dynamic, "cuda_graphs_enabled", False):
+        from bionemo.evo2.run.infer import _reset_layer_cuda_graphs
+
+        # Non-persistent buffers receive new addresses when restored. Discard runners bound to
+        # the old cache/state storage; the next generation call will warm and verify fresh graphs.
+        _reset_layer_cuda_graphs(native_dynamic)
+        context.evo2_warmed_cuda_graph_request_counts = frozenset()
+
+
 def _unwrap_evo2_model(model: Any) -> Any:
     """Unwrap Megatron/DDP/fp16 wrappers until the Evo2 model is visible."""
     current = model
@@ -239,8 +271,16 @@ def generate_evo2_native_batched(
             evo2_seed=initial_seed,
             cuda_graphs_enabled=cuda_graph_impl != "none",
             cuda_graph_scope=effective_cuda_graph_scope,
+            kv_cache_management_mode=str(mcore_generation_config.get("kv_cache_management_mode", "persist")),
         )
         worker._evo2_native_dynamic_components = native_dynamic
+    configured_cache_mode = str(mcore_generation_config.get("kv_cache_management_mode", "persist")).lower()
+    if str(getattr(native_dynamic, "kv_cache_management_mode", "persist")).lower() != configured_cache_mode:
+        raise ValueError(
+            "Evo2 native KV cache mode changed after engine setup; start a fresh worker to apply "
+            f"{configured_cache_mode!r}"
+        )
+    _resume_evo2_native_cache(native_dynamic)
     # This model is reused immediately for an autograd-enabled policy update.
     native_dynamic.use_torch_inference_mode = False
     _reseed_evo2_native_dynamic(native_dynamic, initial_seed)
@@ -644,15 +684,12 @@ class Evo2MegatronGenerationAdapter:
         return worker._parse_result_to_batched_data_dict(data, result)
 
     def finish_worker(self, worker: Any) -> None:
-        """Reset requests while retaining the graph-warmed engine across RL cycles.
+        """Reset requests and apply the configured native cache lifecycle.
 
         NeMo-RL calls this hook after every rollout and validation generation. The adapter's
-        persistent-storage contract prevents its colocated offload from rebinding graph-captured
-        parameters; derived modal tables refresh in place before the next decode. Releasing this
-        cache here would rebuild the context and recapture the same physical request shapes every
-        cycle.
+        Persistent mode retains graph-bound buffers. Offload and recompute release them for policy
+        training, then restore the context and recapture graphs before the next rollout.
         """
         native_dynamic = getattr(worker, "_evo2_native_dynamic_components", None)
-        shared_dyn_ctx = getattr(native_dynamic, "shared_dyn_ctx", None)
-        if shared_dyn_ctx is not None:
-            shared_dyn_ctx.reset()
+        if native_dynamic is not None:
+            _suspend_evo2_native_cache(native_dynamic)

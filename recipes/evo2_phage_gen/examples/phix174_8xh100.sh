@@ -58,7 +58,8 @@ PHAROKKA_DATABASE_URL="${PHAROKKA_DATABASE_URL:-https://zenodo.org/records/21755
 PHAROKKA_DATABASE_MD5="${PHAROKKA_DATABASE_MD5:-143bb375ddb0b0653e5cb5671f4a7629}"
 PHAROKKA_DATABASE_RELEASE="${PHAROKKA_DATABASE_RELEASE:-Pharokka database v1.11.0 / PHROGs v4}"
 CALIBRATION_WORKERS="${CALIBRATION_WORKERS:-8}"
-RL_PROMPT_BATCH_SIZE="${RL_PROMPT_BATCH_SIZE:-12}"
+# Global rollout 256 over DP8 gives 32 local requests. This is distinct from policy training MBS.
+RL_PROMPT_BATCH_SIZE="${RL_PROMPT_BATCH_SIZE:-32}"
 SAFETY_BATCH_SIZE="${SAFETY_BATCH_SIZE:-128}"
 SAFETY_ORF_WORKERS="${SAFETY_ORF_WORKERS:-32}"
 SAFETY_THREADS="${SAFETY_THREADS:-32}"
@@ -204,6 +205,9 @@ if [[ "${WANDB_ENABLED}" == "1" ]]; then
     logger.wandb.project="${WANDB_RL_PROJECT_NAME}"
     logger.wandb.name="${WANDB_RL_RUN_NAME}"
   )
+  if [[ -n "${WANDB_ENTITY_NAME}" ]]; then
+    RL_WANDB_ARGS+=(logger.wandb.entity="${WANDB_ENTITY_NAME}")
+  fi
 fi
 
 STATE_DIR="${RESULT_ROOT}/state"
@@ -385,7 +389,7 @@ fields = (
     str(rollout_seed),
     str(seed_stride),
     "-".join([*(str(value) for value in prompt_lengths), *(name for name, _ in anchors)]),
-    # The loader consumes 16 prompts per step; keep a full six-generation bank.
+    # The loader consumes 16 prompt records per step; retain a balanced multi-epoch bank.
     str(96),
     str((1000 + strata - 1) // strata),
 )
@@ -618,6 +622,8 @@ gpu_type='not queried (dry run)'
 if [[ "${DRY_RUN}" != "1" ]]; then
   export PATH="${RECIPE_ROOT}/data/external/bin:${PATH}"
   export CUDA_DEVICE_MAX_CONNECTIONS=1
+  # MBS32 reaches backward near the allocator ceiling; expandable segments avoid fragmentation
+  # without changing the biological sequence length or effective global batch.
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   export NCCL_GRAPH_REGISTER=0
   if ! gpu_info="$(nvidia-smi --query-gpu=name --format=csv,noheader)"; then
@@ -1023,7 +1029,7 @@ stage_50() {
         --temperature "${SAMPLING_TEMPERATURE}" --top-k "${SAMPLING_TOP_K}" \
         --top-p "${SAMPLING_TOP_P}" --seed "$((SAMPLING_ROLLOUT_SEED + rank * SAMPLING_SEED_STRIDE))" \
         --tensor-parallel-size 1 \
-        --max-seq-length 10240 --prompt-batch-size 16 --inference-backend dynamic \
+        --max-seq-length "${RL_MAX_MODEL_LEN}" --prompt-batch-size 16 --inference-backend dynamic \
         ${INFERENCE_PRECISION_ARGS[@]+"${INFERENCE_PRECISION_ARGS[@]}"} \
         --preserve-eos-token --strict-generation --stream-output \
         --output-file "${outputs[rank]}")

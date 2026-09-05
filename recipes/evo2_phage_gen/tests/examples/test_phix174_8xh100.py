@@ -373,9 +373,17 @@ def test_dry_run(tmp_path: Path) -> None:
     assert "policy.generation.top_k=5" in gdpo
     assert "policy.generation.top_p=0.999" in gdpo
     assert "policy.generation.mcore_generation_config.max_model_len=5632" in gdpo
-    assert "policy.generation.mcore_generation_config.max_requests=12" in gdpo
-    assert "policy.generation.mcore_generation_config.prompt_batch_size=12" in gdpo
-    assert "RL native packed mixed-length decode group size: 12" in log
+    assert "policy.generation.mcore_generation_config.max_requests=32" in gdpo
+    assert "policy.generation.mcore_generation_config.prompt_batch_size=32" in gdpo
+    assert "RL native packed mixed-length decode group size: 32" in log
+
+    rollout_commands = [
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: env CUDA_VISIBLE_DEVICES=" in line and "/bionemo/evo2/run/infer.py" in line
+    ]
+    assert len(rollout_commands) == 8
+    assert all(command[command.index("--max-seq-length") + 1] == "5632" for command in rollout_commands)
 
     conversion = next(
         shlex.split(line.partition("command: ")[2])
@@ -488,6 +496,7 @@ def test_wandb_dry_run(tmp_path: Path) -> None:
     assert "logger.wandb_enabled=true" in full_gdpo
     assert "logger.wandb.project=custom-gdpo" in full_gdpo
     assert "logger.wandb.name=wandb-result-7b-base-gdpo" in full_gdpo
+    assert "logger.wandb.entity=example-team" in full_gdpo
 
 
 def test_single_gpu_plan(tmp_path: Path) -> None:

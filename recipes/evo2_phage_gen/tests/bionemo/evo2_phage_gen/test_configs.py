@@ -216,7 +216,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert env_config["external_qc"]["lovis4u_collect_pdfs"] is False
     assert env_config["sequence_safety"]["batch_size"] >= config["policy"]["generation_batch_size"]
     assert env_config["sequence_safety"] == {
-        "batch_size": 128,
+        "batch_size": 256,
         "orf_workers": 32,
         "phrogs_threads": 64,
         "threads": 32,
@@ -236,19 +236,21 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
         "verbosity": 0,
     }
     assert config["grpo"]["num_prompts_per_step"] == 16
-    assert config["grpo"]["num_generations_per_prompt"] == 6
-    assert config["grpo"]["num_prompts_per_step"] * config["grpo"]["num_generations_per_prompt"] == 96
+    assert config["grpo"]["num_generations_per_prompt"] == 16
+    assert config["grpo"]["num_prompts_per_step"] * config["grpo"]["num_generations_per_prompt"] == 256
     assert config["grpo"]["val_at_start"] is False
     assert config["grpo"]["val_at_end"] is True
-    assert config["policy"]["train_global_batch_size"] == 96
-    assert config["policy"]["train_micro_batch_size"] == 1
-    assert config["policy"]["generation_batch_size"] == 96
+    assert config["policy"]["max_total_sequence_length"] == 5632
+    assert config["policy"]["train_global_batch_size"] == 256
+    assert config["policy"]["train_micro_batch_size"] == 32
+    assert config["policy"]["generation_batch_size"] == 256
     assert config["policy"]["logprob_batch_size"] == 1
     assert config["policy"]["generation"]["max_new_tokens"] + 16 == 5436
     assert config["policy"]["generation"]["max_new_tokens"] + 24 == 5444
     mcore_generation_config = config["policy"]["generation"]["mcore_generation_config"]
-    assert mcore_generation_config["prompt_batch_size"] == 12
-    assert mcore_generation_config["max_requests"] == 12
+    assert mcore_generation_config["prompt_batch_size"] == 32
+    assert mcore_generation_config["max_requests"] == 32
+    assert mcore_generation_config["kv_cache_management_mode"] == "offload"
     assert mcore_generation_config["generation_adapter_config"]["ignore_eos"] is False
     assert mcore_generation_config["generation_adapter_config"]["preserve_eos_token"] is True
     assert mcore_generation_config["generation_adapter_config"]["strict_generation"] is True

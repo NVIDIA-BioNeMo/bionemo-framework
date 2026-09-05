@@ -246,7 +246,7 @@ def test_dynamic_graph_recaptures_after_model_state_change(monkeypatch, change_s
     )
     nd = SimpleNamespace(
         shared_dyn_ctx=context,
-        shared_dyn_ctx_key=(16, 64, False),
+        shared_dyn_ctx_key=(16, 64, False, "persist"),
         static_contexts={(2, 64): static_context},
         cuda_graphs_enabled=True,
         cuda_graph_model_storage_signature=infer_module._model_storage_signature(model),
@@ -387,7 +387,7 @@ def test_static_flash_context_cache_invalidates_on_sequence_capacity_growth(monk
         cuda_graphs_enabled=True,
         hyena_model=object(),
         shared_dyn_ctx=object(),
-        shared_dyn_ctx_key=(16, None, False),
+        shared_dyn_ctx_key=(16, None, False, "persist"),
     )
 
     first, _ = infer_module._get_or_build_static_flash_context(
@@ -757,23 +757,35 @@ def test_generate_dispatches_explicit_static_flash_backend(monkeypatch):
 
 def test_reset_cuda_graphs_clears_current_and_legacy_manager_caches(monkeypatch):
     """Context growth must not leave an installed-MCore custom-key runner alive."""
-    manager = SimpleNamespace(
+    installed_manager = SimpleNamespace(
         cudagraph_runners=[object()],
         custom_cudagraphs_lookup_table={"current": object()},
         inference_cudagraphs_lookup_table={"legacy": object()},
     )
-    model = SimpleNamespace(modules=lambda: [SimpleNamespace(cudagraph_manager=manager)])
+    detached_manager = SimpleNamespace(
+        cudagraph_runners=[object()],
+        custom_cudagraphs_lookup_table={"current": object()},
+        inference_cudagraphs_lookup_table={"legacy": object()},
+    )
+    detached_layer = SimpleNamespace()
+    model = SimpleNamespace(modules=lambda: [SimpleNamespace(cudagraph_manager=installed_manager), detached_layer])
     deleted = []
     monkeypatch.setattr(
         "megatron.core.transformer.cuda_graphs.delete_cuda_graphs",
         lambda: deleted.append(True),
     )
 
-    infer_module._reset_layer_cuda_graphs(SimpleNamespace(hyena_model=model))
+    infer_module._reset_layer_cuda_graphs(
+        SimpleNamespace(
+            hyena_model=model,
+            cuda_graph_manager_bindings=((detached_layer, detached_manager),),
+        )
+    )
 
-    assert manager.cudagraph_runners == []
-    assert manager.custom_cudagraphs_lookup_table == {}
-    assert manager.inference_cudagraphs_lookup_table == {}
+    for manager in (installed_manager, detached_manager):
+        assert manager.cudagraph_runners == []
+        assert manager.custom_cudagraphs_lookup_table == {}
+        assert manager.inference_cudagraphs_lookup_table == {}
     assert deleted == [True]
 
 
@@ -796,7 +808,7 @@ def test_dynamic_context_rebuild_invalidates_warmed_static_contexts(monkeypatch)
     old_dynamic = SimpleNamespace(max_sequence_length=64, max_requests=1)
     nd = SimpleNamespace(
         shared_dyn_ctx=old_dynamic,
-        shared_dyn_ctx_key=(16, 64, False),
+        shared_dyn_ctx_key=(16, 64, False, "persist"),
         static_contexts={(1, 64): stale_static},
         cuda_graphs_enabled=True,
         hyena_model=SimpleNamespace(config=SimpleNamespace(tensor_model_parallel_size=1)),
@@ -2118,6 +2130,49 @@ def test_shared_dynamic_context_reports_cold_setup_and_reuses_same_request_shape
         "sync",
         "reset",
     ]
+
+
+def test_shared_dynamic_context_propagates_nonpersistent_cache_mode(monkeypatch):
+    observed_modes = []
+
+    class _BuildContext:
+        def __init__(self, *, model_config, inference_config):
+            del model_config
+            observed_modes.append(inference_config.kv_cache_management_mode.value)
+            self.max_sequence_length = inference_config.max_sequence_length
+            self.max_tokens = inference_config.max_tokens
+            self.max_requests = inference_config.max_requests
+
+        def initialize_all_tensors(self):
+            pass
+
+    nd = SimpleNamespace(
+        shared_dyn_ctx=None,
+        shared_dyn_ctx_key=None,
+        static_contexts={},
+        cuda_graphs_enabled=False,
+        hyena_model=SimpleNamespace(config=SimpleNamespace(tensor_model_parallel_size=1)),
+        mamba_state_config=object(),
+        max_seq_length=64,
+        kv_cache_management_mode="offload",
+        ctx_cls=_BuildContext,
+    )
+    monkeypatch.setattr(infer_module, "compute_evo2_paged_kv_buffer_size_gb", lambda *_args, **_kwargs: 0.01)
+    monkeypatch.setattr(infer_module, "_begin_cuda_phase", lambda **_kwargs: 0.0)
+    monkeypatch.setattr(infer_module, "_finish_cuda_phase", lambda *_args, **_kwargs: infer_module._CudaPhaseStats())
+
+    context, _, _ = infer_module._get_or_build_shared_dynamic_context(
+        nd,
+        block_size_tokens=16,
+        max_tokens=64,
+        enable_chunked_prefill=False,
+        max_active_requests=2,
+        device=torch.device("cpu"),
+    )
+
+    assert context is nd.shared_dyn_ctx
+    assert observed_modes == ["offload"]
+    assert nd.shared_dyn_ctx_key == (16, 64, False, "offload")
 
 
 # DNA prompts for reproducibility tests (from test_prompt.py)
