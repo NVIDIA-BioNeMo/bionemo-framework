@@ -167,12 +167,14 @@ deallocates paged-KV and Hyena state before policy training, then restores them
 and recaptures graph runners because their buffer addresses changed. Non-persistent cache settings
 must reach MCore's `InferenceConfig`, and a release that leaves tensor state allocated fails rather
 than proceeding toward a later OOM. Persist-cache deployments need lifecycle-aware capacity
-qualification. In the measured single-GB300 trials, MBS32, MBS16, and MBS8 all passed update one
-and later OOMed, but every trial used `val_at_start=true`; initial validation left about 12.55 GiB
-more allocated (152.25 versus 139.70 GiB), so those failures do not establish a pure MBS ceiling
-and none of those values is qualified. Start with training, reach optimizer steady state, run a
-scheduled validation, and then complete a subsequent update. Expandable segments fix
-fragmentation, not retained-state capacity.
+qualification. Initial validation left about 12.55 GiB more allocated (152.25 versus 139.70 GiB)
+in the measured single-GB300 trials, so the earlier MBS32, MBS16, and MBS8 failures did not
+establish a pure MBS ceiling. A subsequent MBS32 trial without initial validation still missed its
+first policy update by about 0.82 GiB on that display-attached node, making MBS32 red for that
+operating point; MBS16 and MBS8 remain unqualified under the corrected lifecycle. Do not transfer
+any of those values to H100. Start with training, reach optimizer steady state, run a scheduled
+validation, and then complete a subsequent update. Expandable segments fix fragmentation, not
+retained-state capacity.
 Optimizer state is offloaded during generation by default. On a device with measured HBM capacity,
 `policy.generation.mcore_generation_config.generation_adapter_config.preserve_optimizer_state_during_generation=true`
 avoids that per-step CPU round trip while still offloading gradients. Qualify it in a disposable
