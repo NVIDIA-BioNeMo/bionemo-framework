@@ -16,6 +16,8 @@
 """Tests for the recipe-local Dockerfile and build context."""
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -51,3 +53,44 @@ def test_recipe_dockerfile_installs_pinned_uv_before_ci_build():
     assert uv_copy is not None
     assert uv_copy.group(1) != "latest"
     assert uv_copy.start() < dockerfile.index("./.ci_build.sh")
+
+
+def test_ci_env_preloads_the_recipe_cudnn_runtime_idempotently(tmp_path: Path):
+    """Ray workers must load the recipe cuDNN even when the image already loaded an older copy."""
+    environment_script = tmp_path / ".ci_test_env.sh"
+    shutil.copyfile(RECIPE_ROOT / ".ci_test_env.sh", environment_script)
+    virtual_environment = tmp_path / ".venv"
+    (virtual_environment / "bin").mkdir(parents=True)
+    (virtual_environment / "bin" / "activate").write_text(f'export VIRTUAL_ENV="{virtual_environment}"\n')
+    cudnn_directory = virtual_environment / "lib/python3.12/site-packages/nvidia/cudnn/lib"
+    cudnn_directory.mkdir(parents=True)
+    cudnn_library = cudnn_directory / "libcudnn.so.9"
+    cudnn_library.touch()
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; source "$1"; printf "%s\\n%s\\n" "$LD_PRELOAD" "$LD_LIBRARY_PATH"',
+            "_",
+            str(environment_script),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "LD_PRELOAD": "/image/libcudnn.so.9",
+            "LD_LIBRARY_PATH": "/image/cudnn",
+        },
+    )
+
+    preload, library_path = result.stdout.splitlines()
+    preload_paths = preload.split(":")
+    library_paths = library_path.split(":")
+    assert preload_paths[0] == str(cudnn_library)
+    assert preload_paths.count(str(cudnn_library)) == 1
+    assert "/image/libcudnn.so.9" in preload_paths
+    assert library_paths[0] == str(cudnn_directory)
+    assert library_paths.count(str(cudnn_directory)) == 1
+    assert "/image/cudnn" in library_paths

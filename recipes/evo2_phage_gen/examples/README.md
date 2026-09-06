@@ -56,6 +56,11 @@ tmux new -s phix174-e2e
 The build reuses the native Torch/CUDA/Transformer Engine stack already in the
 NVIDIA PyTorch container. The launcher sources the resulting recipe-local
 `.ci_test_env.sh`; for standalone commands, source that file yourself.
+On the tested R550 H100 nodes, NGC PyTorch 26.02 supplies the newest CUDA runtime the host driver
+can initialize; 26.07's CUDA 13.3 requires a newer driver. The 26.02 image bundles cuDNN 9.19, so
+the tested recipe build resolved the cuDNN 9.27 runtime required by subquadratic ops, and
+`.ci_test_env.sh` preloads that copy for the driver and Ray workers. Verify effective Torch CUDA,
+cuDNN, and the subquadratic kernel on every worker when adapting the image or driver.
 
 For a fresh PhiX experiment, use the trained-further 7B-1M model and a new result root:
 
@@ -149,9 +154,12 @@ strata: two prompt records and 96 generated sequences per stratum. Validation re
 same-length files alternate four anchors and combine to exactly 1,000 records.
 Each GPU generates its shard in packed batches of 96 by default; set
 `FINAL_PROMPT_BATCH_SIZE` only when qualifying a different device profile.
-The 768-point completed one cold 8×H100 rollout, QC, replay, backward, and optimizer update with no
-replay masks; 1,024 failed recurrent-state allocation before decode, so it is not a supported
-one-wave setting. The standard multi-update pilot remains the steady-state qualification.
+The 768-point setting completed three 8×H100 rollout/QC/replay/update cycles with zero replay masks,
+including validation after update two, a post-validation update, an optimizer-inclusive checkpoint,
+and a fresh-process exact reload. Warm update two took 492.65 seconds for generation including
+233.78 seconds of scoring, 37.74 seconds for policy/reference replay, and 54.60 seconds for the
+policy update. A 1,024-point attempt failed recurrent-state allocation before decode, so it is not
+a supported one-wave setting.
 Legacy synchronous GRPO is bounded by both steps and epochs; this 96-row bank supplies six updates
 per epoch, so the configured 500 epochs safely exceeds the requested 500-step ceiling.
 
@@ -161,14 +169,16 @@ allocating the unused remainder of the 10,240-token SFT context. Native RL traje
 first sampled EOD and its log-probability, mask only synthetic padding, and exclude EOD and any
 post-EOD physical samples from biological QC. Filtered policy replay also keeps each sampled action
 in a normalized target-preserving support; generation-versus-replay error telemetry remains enabled.
+Qualification reports authentic EOD, capped-without-EOD, and below-cap-without-EOD as three
+exclusive outcomes, then evaluates length-band placement only for authentic stops.
 
 The policy defaults to global batch 768, candidate training microbatch 8, validation 96, and
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. The standard pilot disables initial validation,
 trains for two updates, validates, and then completes a third update. Adam state first materializes
 during update one, and the post-validation update detects memory or graph state retained by
 validation, so a one-update pass or terminal validation does not establish steady-state capacity.
-MBS8 is a conservative, unqualified starting point for the 8×H100 pilot, not a measured
-steady-state maximum. Set `RL_TRAIN_MICRO_BATCH_SIZE` to qualify another candidate through the same
+MBS8 is the qualified 8×H100 default, not a measured steady-state maximum. Set
+`RL_TRAIN_MICRO_BATCH_SIZE` to qualify another candidate through the same
 pilot without changing global batch or rollout size. For Evo2 7B at TP1, its largest local GLU output
 is `8 × 5,632 × 11,008 = 495,976,448` elements, below signed-int32 indexing; the launcher
 rejects larger resolved shapes before worker allocation. TP2 halves the local FFN width and DP only

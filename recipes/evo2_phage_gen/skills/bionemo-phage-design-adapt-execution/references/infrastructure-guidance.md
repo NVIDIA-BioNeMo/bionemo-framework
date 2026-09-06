@@ -4,6 +4,8 @@ Use the execution path actually available to the user: local GPU, SSH, Slurm, Le
 
 On a GPU workstation where the agent starts outside Docker, use a GPU-enabled container instead of assuming the host can build the recipe directly. The build scripts are tested against the NVIDIA PyTorch container environment. Build from the recipe `Dockerfile` or use the repository `.devcontainer/` as a convenient base, expose the workstation GPUs through the NVIDIA container runtime, and bind-mount the checkout and selected data, cache, and result locations. Build the code inside the mounted checkout with `./.ci_build.sh`, then source `.ci_test_env.sh` for subsequent commands so the running code and editable checkout remain aligned.
 
+Match the container CUDA runtime to the host driver before building. If that compatible image's cuDNN is older than a required kernel but the recipe installs a newer runtime, select the recipe library at process startup—an explicit preload may be necessary because a search path cannot replace an already-loaded library—and verify effective CUDA, cuDNN, and the kernel on every distributed worker.
+
 The external-asset installer selects native Linux x86_64 or aarch64 downloads for MMseqs2-GPU, DIAMOND, HMMER, and AMRFinderPlus. It keeps non-x86 tools in architecture-qualified extraction directories so copied x86 caches are not reused accidentally. Before scientific stages, verify the selected executables' architecture and versions. A CPU architecture other than x86_64 or aarch64 still needs explicit archive mappings and validation; changing only the base container is insufficient.
 
 Source-built Biotite dependencies under `--no-build-isolation` require Hatchling, hatch-vcs, and

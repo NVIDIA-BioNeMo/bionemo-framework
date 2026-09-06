@@ -115,6 +115,20 @@
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-009-container-driver-cudnn",
+      "prompt": "An 8xH100 host exposes an R550 driver. A CUDA 13.3 container cannot initialize CUDA, while a CUDA 13.1 container can. The compatible container bundles cuDNN 9.19, but a required kernel needs cuDNN 9.24 and the recipe environment installs cuDNN 9.27. Adding its directory only to LD_LIBRARY_PATH leaves distributed workers on the old cuDNN. Adapt the runtime without changing the host driver or weakening the kernel.",
+      "expected_output": "A driver-compatible container using the recipe-installed cuDNN through explicit process startup selection, verified on every distributed worker.",
+      "assertions": [
+        "The response selects the CUDA 13.1 container that the R550 host can initialize rather than retrying the incompatible CUDA 13.3 image.",
+        "It retains the required kernel and recipe-installed cuDNN 9.27 instead of downgrading the kernel to fit the image's cuDNN 9.19.",
+        "Because LD_LIBRARY_PATH alone did not change the loaded library, it uses an explicit startup mechanism such as LD_PRELOAD for the recipe's libcudnn.so.9.",
+        "It verifies the effective Torch CUDA and cuDNN versions plus the required kernel probe inside every distributed worker, not only in the driver process.",
+        "It records the compatible image, host-driver constraint, and recipe environment activation contract for resume jobs."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
     }
   ]
 }
