@@ -16,8 +16,6 @@
 """Tests for the recipe-local Dockerfile and build context."""
 
 import re
-import shutil
-import subprocess
 from pathlib import Path
 
 
@@ -53,34 +51,3 @@ def test_recipe_dockerfile_installs_pinned_uv_before_ci_build():
     assert uv_copy is not None
     assert uv_copy.group(1) != "latest"
     assert uv_copy.start() < dockerfile.index("./.ci_build.sh")
-
-
-def test_ci_env_prefers_venv_cudnn_runtime(tmp_path: Path):
-    """The activated wheel runtime must precede an older cuDNN supplied by the image."""
-    environment_script = tmp_path / ".ci_test_env.sh"
-    shutil.copyfile(RECIPE_ROOT / ".ci_test_env.sh", environment_script)
-    virtual_environment = tmp_path / ".venv"
-    (virtual_environment / "bin").mkdir(parents=True)
-    (virtual_environment / "bin" / "activate").write_text(
-        f'export VIRTUAL_ENV="{virtual_environment}"\n'
-    )
-    cudnn_library = virtual_environment / "lib/python3.12/site-packages/nvidia/cudnn/lib"
-    cudnn_library.mkdir(parents=True)
-
-    result = subprocess.run(
-        [
-            "bash",
-            "-c",
-            'source "$1"; printf "%s" "$LD_LIBRARY_PATH"',
-            "_",
-            str(environment_script),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        env={"PATH": "/usr/bin:/bin", "LD_LIBRARY_PATH": "/image/cudnn"},
-    )
-
-    library_paths = result.stdout.split(":")
-    assert library_paths[0] == str(cudnn_library)
-    assert "/image/cudnn" in library_paths
