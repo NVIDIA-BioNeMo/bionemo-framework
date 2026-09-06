@@ -70,8 +70,9 @@ CALIBRATION_WORKERS="${CALIBRATION_WORKERS:-8}"
 RL_PROMPT_BATCH_SIZE="${RL_PROMPT_BATCH_SIZE:-96}"
 # Standalone final generation has no optimizer state resident, so reuse the qualified local wave.
 FINAL_PROMPT_BATCH_SIZE="${FINAL_PROMPT_BATCH_SIZE:-96}"
-# MBS8 is the conservative H100 start. Offload-cache MBS32 passed two steady-state GB300 updates,
-# but that does not establish H100 capacity; TP1 MBS64 also exceeds the signed-int32 local GLU span.
+# MBS8 is the qualified H100 default, not a measured ceiling. Offload-cache MBS32 passed two
+# steady-state GB300 updates, but that does not establish H100 capacity; TP1 MBS64 also exceeds
+# the signed-int32 local GLU span.
 RL_TRAIN_MICRO_BATCH_SIZE="${RL_TRAIN_MICRO_BATCH_SIZE:-8}"
 SAFETY_BATCH_SIZE="${SAFETY_BATCH_SIZE:-128}"
 SAFETY_ORF_WORKERS="${SAFETY_ORF_WORKERS:-32}"
