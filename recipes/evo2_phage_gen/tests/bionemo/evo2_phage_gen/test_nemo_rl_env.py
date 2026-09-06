@@ -115,6 +115,18 @@ def test_phage_qc_actor_serializes_already_batched_calls():
     assert nemo_rl_env.PhageQCEnvironment._default_options["max_concurrency"] == 1
 
 
+def test_phage_qc_actor_keeps_cpu_scoring_off_policy_gpus():
+    """A CPU-reserved QC actor must not retain model state on a policy GPU."""
+    if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
+        pytest.skip("NeMo-RL is unavailable")
+
+    env_vars = nemo_rl_env.PhageQCEnvironment._default_options["runtime_env"]["env_vars"]
+
+    assert env_vars["PHAGEHOSTLEARN_ESM_DEVICE"] == "cpu"
+    assert env_vars["PHAGEHOSTLEARN_CUDA_VISIBLE_DEVICES"] == ""
+    assert env_vars["CUDA_VISIBLE_DEVICES"] == ""
+
+
 def test_extract_assistant_sequence_concatenates_assistant_messages():
     """Only assistant messages should contribute to generated DNA."""
     message_log = [

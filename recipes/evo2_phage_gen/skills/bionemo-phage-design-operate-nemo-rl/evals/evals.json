@@ -395,6 +395,20 @@
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-operate-nemo-rl-030-cpu-actor-gpu-isolation",
+      "prompt": "A CPU-reserved phage QC actor inherits PHAGEHOSTLEARN_ESM_DEVICE=cuda:0 and creates an extra CUDA context on a fully occupied policy GPU. The rollout succeeds, but a later update reproducibly OOMs on that rank. Shrink the policy microbatch.",
+      "expected_output": "Keep the policy shape fixed, isolate the CPU QC actor from CUDA, and verify the device process table before interpreting capacity.",
+      "assertions": [
+        "The response does not infer a policy microbatch ceiling before removing the unexpected QC-actor CUDA context.",
+        "It sets CUDA_VISIBLE_DEVICES and PHAGEHOSTLEARN_CUDA_VISIBLE_DEVICES to empty strings in the actor runtime environment.",
+        "It pins PHAGEHOSTLEARN_ESM_DEVICE to cpu without disabling the scorer or its intended internal CPU parallelism.",
+        "It verifies that GPU process tables contain only the expected policy ranks during scoring and through a later update.",
+        "It records scientific optimizer steps independently from any W&B history cursor when assessing recovery progress."
+      ],
+      "expected_skill": "bionemo-phage-design-operate-nemo-rl",
+      "expected_script": null
     }
   ]
 }
