@@ -123,7 +123,12 @@ are not uploaded retroactively.
 [`default-sampling-selection.yaml`](default-sampling-selection.yaml) contains the current PhiX
 defaults and is the schema for a custom selection. Passing `--sampling-selection` is an explicit
 override, not a choice derived from the fresh calibration evidence. The defaults use temperature
-1, top-k 5, and top-p 0.999; sampled EOD is retained so the length reward can teach termination.
+1, top-k 5, and top-p 1.0, which disables nucleus filtering while retaining the complete top-5
+support so the length reward can teach termination. When qualifying another cutoff, reproduce the
+deployed temperature, top-k, then shifted top-p chain: after top-k renormalization, EOD remains in
+support according to the cumulative mass strictly before EOD. Verify that deployed support includes
+EOD at the authentic boundary for every prompt stratum; checking its raw rank before top-p is not
+sufficient.
 The decoder ceiling reaches approximately 5,436–5,444 nt across the prompt mixture, 10–18 nt past
 the length reward's 5,426-nt upper zero, so a no-EOD rollout receives no length credit. The broad
 3,000–5,359-nt lower shaping taper reaches initially short rollouts, while the 5,359–5,391-nt

@@ -388,7 +388,7 @@ def test_dry_run(tmp_path: Path) -> None:
     assert "checkpointing.pretrained_checkpoint.path=<rl-sft-checkpoint>" in gdpo
     assert "policy.model_name=bionemo/evo2_7b_base" in gdpo
     assert "policy.generation.top_k=5" in gdpo
-    assert "policy.generation.top_p=0.999" in gdpo
+    assert "policy.generation.top_p=1.0" in gdpo
     assert "policy.generation.mcore_generation_config.max_model_len=5632" in gdpo
     assert "policy.generation.mcore_generation_config.max_requests=96" in gdpo
     assert "policy.generation.mcore_generation_config.prompt_batch_size=96" in gdpo

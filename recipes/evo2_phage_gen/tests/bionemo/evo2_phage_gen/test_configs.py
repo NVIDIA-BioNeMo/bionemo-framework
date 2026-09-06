@@ -173,7 +173,7 @@ def test_gdpo_config_uses_positional_objectives_and_mmseqs_diversity():
     assert config["loss_fn"]["token_level_loss"] is False
     assert config["grpo"]["seq_logprob_error_threshold"] == 1.5
     assert config["policy"]["generation"]["top_k"] == 5
-    assert config["policy"]["generation"]["top_p"] == 0.999
+    assert config["policy"]["generation"]["top_p"] == 1.0
     assert config["policy"]["generation"]["mcore_generation_config"]["generation_adapter_config"]["seed"] == 42
     assert config["policy"]["megatron_cfg"]["optimizer"]["lr"] == 1.0e-6
     assert config["policy"]["megatron_cfg"]["optimizer"]["min_lr"] == 1.0e-7

@@ -145,6 +145,20 @@
       ],
       "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
       "expected_script": "scripts/calibration/run_sampling_calibration_scoring.sh"
+    },
+    {
+      "id": "bionemo-phage-design-calibrate-rl-sampling-011-terminal-support",
+      "prompt": "At each of four authentic prompt-stratum endpoints, EOD is in the model's raw top five. Under the deployed temperature 1, top-k 5, top-p 0.999 chain, it survives at only two endpoints. Keep the same checkpoint and prompt bank and choose the portable sampling correction.",
+      "expected_output": "Evaluate terminal support after the exact deployed filter chain and retain EOD support at every authentic prompt stratum.",
+      "assertions": [
+        "The response does not infer deployed EOD support from raw top-k rank alone.",
+        "It applies temperature, top-k, and then shifted top-p, using cumulative renormalized top-k mass strictly before EOD.",
+        "It requires EOD to remain in deployed support at every authentic prompt stratum.",
+        "It prefers disabling nucleus filtering with top-p 1.0 when top-k already bounds support, rather than choosing a margin-sensitive cutoff or adding a length schedule or EOD-reinsertion special case.",
+        "It treats the sampling change as a new SFT-anchored RL attempt rather than resuming an existing RL result root in place."
+      ],
+      "expected_skill": "bionemo-phage-design-calibrate-rl-sampling",
+      "expected_script": "examples/phix174_8xh100.sh"
     }
   ]
 }

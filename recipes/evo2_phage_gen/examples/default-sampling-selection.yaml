@@ -2,7 +2,8 @@
 # the fresh-calibration compatibility check; see examples/README.md.
 temperature: 1.0
 top_k: 5
-top_p: 0.999
+# Keep the complete top-5 support, including terminal EOD at every prompt stratum.
+top_p: 1.0
 # Total caps are 5,436-5,444 nt, 10-18 nt past the length reward's upper zero;
 # sampled EOD may terminate earlier.
 max_new_tokens: 5420

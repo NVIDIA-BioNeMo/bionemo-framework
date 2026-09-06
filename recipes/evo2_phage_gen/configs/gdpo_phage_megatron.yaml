@@ -76,7 +76,8 @@ policy:
   generation:
     max_new_tokens: 5420
     temperature: 1.0
-    top_p: 0.999
+    # Retain the complete top-5 support so nucleus filtering cannot remove terminal EOD.
+    top_p: 1.0
     top_k: 5
     mcore_generation_config:
       max_requests: 96
