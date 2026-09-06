@@ -1,0 +1,7 @@
+schema_version: 1
+
+harbor:
+  task_source: evals_json
+
+grading:
+  mode: aces_default

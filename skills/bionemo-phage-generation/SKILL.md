@@ -15,8 +15,8 @@ Use `interactive` unless the user requests `batch`. Preserve the user's original
 
 Prefer a checkout supplied by the user, then a compatible nearby checkout. Compatibility requires:
 
-- `recipes/evo2_phage_gen/VERSION >= 2.5`;
-- `recipes/evo2_phage_gen/skills/bionemo-phage-design/SKILL.md`.
+- `$BIONEMO_RECIPES/recipes/evo2_phage_gen/VERSION >= 2.5`;
+- `$BIONEMO_RECIPES/recipes/evo2_phage_gen/skills/bionemo-phage-design/SKILL.md`.
 
 If none is available, acquire `https://github.com/NVIDIA-BioNeMo/bionemo-recipes` or another compatible revision without overwriting an existing checkout. Record the selected checkout and recipe roots and, when available, its revision.
 
