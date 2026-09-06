@@ -16,14 +16,18 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import io
 import json
 import os
 import shlex
 import subprocess
 import sys
+import tarfile
 import urllib.request
 from pathlib import Path
+
+import yaml
 
 
 RECIPE_ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +41,9 @@ top_k: 17
 top_p: 0.85
 max_new_tokens: 5800
 prompt_lengths: [4, 8, 16, 24]
+prompt_anchors:
+  - {name: left, start_1_based: 100}
+  - {name: right, start_1_based: 4000}
 rl_seed: 101
 rollout_seed: 7
 seed_stride: 11
@@ -44,6 +51,35 @@ seed_stride: 11
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     return text
+
+
+def _write_mbridge_checkpoint(root: Path, *, iteration_number: int = 1) -> Path:
+    iteration = root / f"iter_{iteration_number:07d}"
+    iteration.mkdir(parents=True)
+    (root / "latest_checkpointed_iteration.txt").write_text(f"{iteration_number}\n")
+    (iteration / ".metadata").write_bytes(b"metadata")
+    (iteration / "__0_0.distcp").write_bytes(b"weights")
+    (iteration / "common.pt").write_bytes(b"common")
+    (iteration / "metadata.json").write_text("{}\n")
+    (iteration / "run_config.yaml").write_text("model: {}\noptimizer: {}\n")
+    return iteration
+
+
+def _write_prepared_sft_checkpoint(root: Path) -> Path:
+    iteration = _write_mbridge_checkpoint(root, iteration_number=5200)
+    files = [path for path in iteration.rglob("*") if path.is_file()]
+    manifest = {
+        "schema_version": 2,
+        "state": "succeeded",
+        "copy_mode": "model-only-dcp-rewrite",
+        "model_object_state_preserved": True,
+        "prepared_sft_checkpoint": str(iteration.resolve()),
+        "prepared_run_config_sha256": hashlib.sha256((iteration / "run_config.yaml").read_bytes()).hexdigest(),
+        "payload_file_count": len(files),
+        "payload_bytes": sum(path.stat().st_size for path in files),
+    }
+    (root / "preparation-manifest.json").write_text(json.dumps(manifest) + "\n")
+    return iteration
 
 
 def test_control_fasta_ids(tmp_path: Path, monkeypatch) -> None:
@@ -113,6 +149,7 @@ def test_dry_run(tmp_path: Path) -> None:
             "API_KEY": "do-not-record",
             "NVIDIA_API_KEY": "also-do-not-record",
             "NEMO_RL_RAY_NUM_CPUS": "96",
+            "TMPDIR": str(tmp_path / "node-local"),
         },
         check=False,
         capture_output=True,
@@ -128,7 +165,7 @@ def test_dry_run(tmp_path: Path) -> None:
         "20 train/select/evaluate SFT",
         "30 calibrate sampling",
         "40 prepare SFT checkpoint for RL; pilot/check/train/monitor/select GDPO",
-        "50 generate, deduplicate, SFT-score, hard-QC, cluster, and report 1,000 genomes",
+        "50 generate, SFT-score, deduplicate, hard-QC, cluster, and report 1,000 genomes",
     ]
     settings = json.loads((result_root / "settings.json").read_text())
     assert settings == {
@@ -136,6 +173,9 @@ def test_dry_run(tmp_path: Path) -> None:
         "gpu_count": 8,
         "gpu_type": "not queried (dry run)",
         "sft_tensor_parallel_size": 2,
+        "sft_max_steps": 12000,
+        "rl_train_micro_batch_size": 8,
+        "final_prompt_batch_size": 96,
         "model_variant": "7b-base",
         "base_checkpoint": "evo2/7b-8k:1.0",
         "model_size": "evo2_7b_base",
@@ -149,8 +189,14 @@ def test_dry_run(tmp_path: Path) -> None:
         "wandb_rl_project": "evo2-phage-design-gdpo",
         "wandb_sft_run_name": "result-7b-base-sft",
         "wandb_rl_run_name": "result-7b-base-gdpo",
+        "wandb_init_timeout": 300,
     }
     log = (result_root / "RUNLOG.md").read_text()
+    assert "TARGET_LENGTH=5444" in log
+    assert (
+        "sampling selection: temperature=1.0, prompt lengths=16 24, "
+        "anchors=origin:1 before_g:2387 after_h:3918 a_cluster_start:3973, max new tokens=5420"
+    ) in log
     for command in (
         "evo2_phage_prepare_external_assets",
         "evo2_phage_sequence_safety",
@@ -226,14 +272,14 @@ def test_dry_run(tmp_path: Path) -> None:
     assert f"Arc screening working directory: {RECIPE_ROOT.parents[1]}" in log
     assert "Arc internal MMseqs clustering disabled" in log
 
-    deduplication = log.index("command: evo2_phage_generation deduplicate-fasta")
     likelihood = log.index("monitor: selected-SFT likelihood scoring")
+    deduplication = log.index("command: evo2_phage_generation deduplicate-fasta")
     safety = log.index("command: evo2_phage_sequence_safety scan", likelihood)
     target = log.index("monitor: Arc target profile")
     diagnostic = log.index("monitor: Arc filter-7 diagnostic")
     clustering = log.index("command: evo2_phage_generation cluster-post-qc")
     reporting = log.index("command: evo2_phage_generation finalize-rollout")
-    assert deduplication < likelihood < safety < target < diagnostic < clustering < reporting
+    assert likelihood < deduplication < safety < target < diagnostic < clustering < reporting
     assert "/rollout/deduplication/representatives.fasta" in log
     likelihood_command = next(
         shlex.split(line.partition("command: ")[2])
@@ -243,11 +289,14 @@ def test_dry_run(tmp_path: Path) -> None:
     assert likelihood_command[likelihood_command.index("--micro-batch-size") + 1] == "8"
     assert "--use-subquadratic-ops" not in likelihood_command
 
-    sft_command = next(
+    sft_commands = [
         shlex.split(line.partition("command: ")[2])
         for line in log.splitlines()
-        if "command: torchrun " in line and "--max-steps 12000" in line
-    )
+        if "command: torchrun " in line and "train_evo2" in line
+    ]
+    assert len(sft_commands) == 3
+    assert all("--eod-pad-in-loss-mask" not in command for command in sft_commands)
+    sft_command = next(command for command in sft_commands if "--max-steps" in command and "12000" in command)
     assert sft_command[sft_command.index("--keep-best-k") + 1] == "3"
     assert sft_command[sft_command.index("--model-size") + 1] == "evo2_7b_base"
     assert sft_command[sft_command.index("--most-recent-k") + 1] == "1"
@@ -257,45 +306,121 @@ def test_dry_run(tmp_path: Path) -> None:
     assert sft_command[sft_command.index("--checkpoint-metric-step-tolerance") + 1] == "1"
     assert "--wandb-project" not in sft_command
 
-    heldout_command = next(
-        shlex.split(line.partition("command: ")[2])
-        for line in log.splitlines()
-        if "command: torchrun " in line and "--experiment-name evo2-heldout" in line
-    )
+    heldout_command = next(command for command in sft_commands if "evo2-heldout" in command)
     assert heldout_command[heldout_command.index("--max-steps") + 1] == "0"
     assert heldout_command[heldout_command.index("--decay-steps") + 1] == "1"
 
     arc_commands = [
         shlex.split(line.partition("command: ")[2])
         for line in log.splitlines()
-        if "command: evo2_phage_prepare_arc_pipeline " in line
+        if "command: " in line and "evo2_phage_prepare_arc_pipeline" in line
     ]
     assert len(arc_commands) == 2
-    assert all("--overwrite" in command for command in arc_commands)
+    expected_arc_prefix = [
+        "env",
+        "GIT_CONFIG_COUNT=1",
+        "GIT_CONFIG_KEY_0=safe.directory",
+        f"GIT_CONFIG_VALUE_0={RECIPE_ROOT}/data/external/arc_evo2",
+        "evo2_phage_prepare_arc_pipeline",
+    ]
+    for command in arc_commands:
+        assert command[: len(expected_arc_prefix)] == expected_arc_prefix
+        assert "--overwrite" in command
+
+    rotation_control = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: evo2_phage_generation write-reference-rotations " in line
+    )
+    control_anchors = [
+        rotation_control[index + 1]
+        for index, value in enumerate(rotation_control)
+        if value == "--prompt-anchor"
+    ]
+    assert control_anchors == [
+        "coordinate_origin:1",
+        "before_g:2387",
+        "after_h:3918",
+        "a_cluster_start:3973",
+    ]
 
     rl_control = next(
         shlex.split(line.partition("command: ")[2])
         for line in log.splitlines()
         if "command: evo2_phage_check_rl " in line and "--control-fasta" in line
     )
-    assert rl_control[rl_control.index("--control-fasta") + 1].endswith("NC_001422_1.fna")
+    assert rl_control[rl_control.index("--control-fasta") + 1].endswith(
+        "/rl/environment-control/reference-rotations.fasta"
+    )
     assert rl_control[rl_control.index("--control-dir") + 1].endswith("/rl/environment-control")
     assert rl_control[rl_control.index("--prompt-data") + 1] == str(result_root / "rl/train.jsonl")
     assert rl_control[rl_control.index("--checkpoint") + 1] == "<rl-sft-checkpoint>"
     preparation = log.index("command: python -m bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl")
     assert preparation < log.index("command: evo2_phage_check_rl")
-    assert log.index("monitor: RL environment control") < log.index("monitor: one-step GDPO pilot")
+    assert log.index("monitor: RL environment control") < log.index(
+        "monitor: three-step post-validation GDPO pilot"
+    )
+
+    likelihood_command = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: torchrun " in line and "predict_evo2" in line
+    )
+    assert likelihood_command[likelihood_command.index("--ckpt-dir") + 1] == "<rl-sft-checkpoint>"
 
     gdpo_commands = [
         shlex.split(line.partition("command: ")[2])
         for line in log.splitlines()
         if "command: evo2_phage_run_gdpo " in line
     ]
-    assert len(gdpo_commands) == 2
+    assert len(gdpo_commands) == 3
+    pilot = next(command for command in gdpo_commands if "grpo.max_num_steps=3" in command)
+    reload = next(command for command in gdpo_commands if "grpo.max_num_steps=3" in command and command is not pilot)
+    full = next(command for command in gdpo_commands if "grpo.max_num_steps=3" not in command)
+    assert "logger.log_dir=" + str(result_root / "rl-pilot-reload/logs") in reload
+    assert "checkpointing.checkpoint_dir=" + str(result_root / "rl-pilot/checkpoints") in reload
+    assert "checkpointing.save_optimizer=true" in pilot
+    assert "checkpointing.save_optimizer=true" in reload
+    assert "checkpointing.save_optimizer=true" in full
+    assert "command: python -m bionemo.evo2_phage_gen.rl_pilot_qualification" in log
     assert all("logger.wandb_enabled=false" in command for command in gdpo_commands)
-    gdpo = gdpo_commands[0]
+    gdpo = pilot
     assert "checkpointing.pretrained_checkpoint.path=<rl-sft-checkpoint>" in gdpo
     assert "policy.model_name=bionemo/evo2_7b_base" in gdpo
+    assert "policy.generation.top_k=5" in gdpo
+    assert "policy.generation.top_p=1.0" in gdpo
+    assert "policy.generation.mcore_generation_config.max_model_len=5632" in gdpo
+    assert "policy.generation.mcore_generation_config.max_requests=96" in gdpo
+    assert "policy.generation.mcore_generation_config.prompt_batch_size=96" in gdpo
+    assert "policy.generation.mcore_generation_config.kv_cache_management_mode=offload" in gdpo
+    assert "env.phage_qc.external_qc.lovis4u_parallel_jobs=64" in gdpo
+    assert "env.phage_qc.external_qc.lovis4u_mmseqs_threads=2" in gdpo
+    assert "env.phage_qc.mmseqs_cluster_diversity.parallel_jobs=16" in gdpo
+    assert "env.phage_qc.mmseqs_cluster_diversity.threads=8" in gdpo
+    assert (
+        "env.phage_qc.external_qc.work_dir="
+        + str(tmp_path / "node-local/evo2-phage-gen/result-7b-base/external-qc/pilot")
+        in pilot
+    )
+    assert (
+        "env.phage_qc.external_qc.work_dir="
+        + str(tmp_path / "node-local/evo2-phage-gen/result-7b-base/external-qc/pilot-reload")
+        in reload
+    )
+    assert (
+        "env.phage_qc.external_qc.work_dir="
+        + str(tmp_path / "node-local/evo2-phage-gen/result-7b-base/external-qc/full")
+        in full
+    )
+    assert "RL policy train microbatch: 8; native packed mixed-length decode group size: 96" in log
+
+    rollout_commands = [
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: env CUDA_VISIBLE_DEVICES=" in line and "/bionemo/evo2/run/infer.py" in line
+    ]
+    assert len(rollout_commands) == 8
+    assert all(command[command.index("--max-seq-length") + 1] == "5632" for command in rollout_commands)
 
     conversion = next(
         shlex.split(line.partition("command: ")[2])
@@ -304,6 +429,42 @@ def test_dry_run(tmp_path: Path) -> None:
     )
     assert conversion[conversion.index("--nemo2-ckpt-dir") + 1] == "<downloaded-evo2-7b-8k>"
     assert conversion[conversion.index("--model-size") + 1] == "evo2_7b_base"
+
+
+def test_default_cpu_capacity_ignores_openmp_process_limit(tmp_path: Path) -> None:
+    """Tool limits do not shrink capacity, while the H100 default reserves host headroom."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    nproc = fake_bin / "nproc"
+    nproc.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ -n \"${OMP_NUM_THREADS:-}\" || -n \"${OMP_THREAD_LIMIT:-}\" ]]; then\n"
+        "  printf '32\\n'\n"
+        "else\n"
+        "  printf '224\\n'\n"
+        "fi\n"
+    )
+    nproc.chmod(0o755)
+    result_root = tmp_path / "result"
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"NUM_CPUS", "NEMO_RL_RAY_NUM_CPUS", "OMP_THREAD_LIMIT"}
+    }
+    env.update({"PATH": f"{fake_bin}:{env['PATH']}", "OMP_NUM_THREADS": "32"})
+
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((result_root / "settings.json").read_text())["cpu_count"] == 150
 
 
 def test_hopper_fp8_inference_is_forwarded_only_to_endpoint_workflows(tmp_path: Path) -> None:
@@ -373,7 +534,7 @@ def test_wandb_dry_run(tmp_path: Path) -> None:
             str(result_root),
         ],
         cwd=RECIPE_ROOT,
-        env={**os.environ, "WANDB_API_KEY": "do-not-record"},
+        env={**os.environ, "WANDB_API_KEY": "do-not-record", "WANDB_INIT_TIMEOUT": "301"},
         check=False,
         capture_output=True,
         text=True,
@@ -388,6 +549,7 @@ def test_wandb_dry_run(tmp_path: Path) -> None:
     assert settings["wandb_rl_project"] == "custom-gdpo"
     assert settings["wandb_sft_run_name"] == "wandb-result-7b-base-sft"
     assert settings["wandb_rl_run_name"] == "wandb-result-7b-base-gdpo"
+    assert settings["wandb_init_timeout"] == 301
 
     log = (result_root / "RUNLOG.md").read_text()
     assert "do-not-record" not in log
@@ -400,14 +562,20 @@ def test_wandb_dry_run(tmp_path: Path) -> None:
     assert all("--wandb-project" not in command for command in sft_commands if command is not full_sft)
 
     gdpo_commands = [command for command in commands if command[:1] == ["evo2_phage_run_gdpo"]]
-    assert len(gdpo_commands) == 2
-    pilot = next(command for command in gdpo_commands if "grpo.max_num_steps=1" in command)
-    full_gdpo = next(command for command in gdpo_commands if command is not pilot)
-    assert "logger.wandb_enabled=false" in pilot
-    assert not any(part.startswith("logger.wandb.project=") for part in pilot)
+    assert len(gdpo_commands) == 3
+    pilots = [command for command in gdpo_commands if "grpo.max_num_steps=3" in command]
+    full_gdpo = next(command for command in gdpo_commands if command not in pilots)
+    assert len(pilots) == 2
+    for pilot in pilots:
+        assert "logger.wandb_enabled=false" in pilot
+        assert "grpo.val_at_start=false" in pilot
+        assert "grpo.val_period=2" in pilot
+        assert "grpo.val_at_end=true" in pilot
+        assert not any(part.startswith("logger.wandb.project=") for part in pilot)
     assert "logger.wandb_enabled=true" in full_gdpo
     assert "logger.wandb.project=custom-gdpo" in full_gdpo
     assert "logger.wandb.name=wandb-result-7b-base-gdpo" in full_gdpo
+    assert "+logger.wandb.entity=example-team" in full_gdpo
 
 
 def test_single_gpu_plan(tmp_path: Path) -> None:
@@ -436,6 +604,15 @@ def test_single_gpu_plan(tmp_path: Path) -> None:
 
     log = (result_root / "RUNLOG.md").read_text()
     commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
+    prompt_banks = [command for command in commands if command[:2] == ["evo2_phage_generation", "write-rl-prompts"]]
+    assert len(prompt_banks) == 2
+    assert all(command.count("--prompt-anchor") == 4 for command in prompt_banks)
+    calibration = next(
+        command
+        for command in commands
+        if command[:1] == ["env"] and "scripts/calibration/run_sft_sampling_sweep.sh" in command
+    )
+    assert "PROMPT_ANCHORS=origin:1 before_g:2387 after_h:3918 a_cluster_start:3973" in calibration
     sft = next(command for command in commands if command[:1] == ["torchrun"] and "--max-steps" in command)
     assert sft[sft.index("--nproc-per-node") + 1] == "1"
     assert sft[sft.index("--tensor-model-parallel-size") + 1] == "1"
@@ -450,8 +627,30 @@ def test_single_gpu_plan(tmp_path: Path) -> None:
     ]
     assert [command[command.index("--seed") + 1] for command in rollout] == ["7"]
     assert all(command[command.index("--inference-backend") + 1] == "dynamic" for command in rollout)
-    assert all("--ignore-eos" in command for command in rollout)
+    assert all("--ignore-eos" not in command for command in rollout)
+    assert all("--preserve-eos-token" in command for command in rollout)
     assert "interleave prompt lengths (16 24) across 1 deterministic mixed-length shard(s)" in log
+
+
+def test_sft_step_override(tmp_path: Path) -> None:
+    result_root = tmp_path / "sft-step-override"
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env={**os.environ, "SFT_MAX_STEPS": "2400"},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((result_root / "settings.json").read_text())["sft_max_steps"] == 2400
+    log = (result_root / "RUNLOG.md").read_text()
+    commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
+    sft_commands = [command for command in commands if command[:1] == ["torchrun"] and "train_evo2" in command]
+    full_sft = next(command for command in sft_commands if "--enable-preemption" in command)
+    assert full_sft[full_sft.index("--max-steps") + 1] == "2400"
 
 
 def test_sampling_selection_allows_length_count_that_does_not_divide_batches(tmp_path: Path) -> None:
@@ -463,6 +662,9 @@ top_k: 17
 top_p: 0.85
 max_new_tokens: 5800
 prompt_lengths: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+prompt_anchors:
+  - name: origin
+    start_1_based: 1
 rl_seed: 101
 rollout_seed: 7
 seed_stride: 11
@@ -498,7 +700,7 @@ seed_stride: 11
     log = (result_root / "RUNLOG.md").read_text()
     commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
     prompt_banks = [command for command in commands if command[:2] == ["evo2_phage_generation", "write-rl-prompts"]]
-    assert [command[command.index("--num-records") + 1] for command in prompt_banks] == ["14", "96"]
+    assert [command[command.index("--num-records") + 1] for command in prompt_banks] == ["96", "96"]
     assert "interleave prompt lengths (0 1 2 3 4 5 6 7 8 9 10 11 12)" in log
 
 
@@ -543,9 +745,9 @@ def test_dry_run_supports_preferred_7b_1m_variant(tmp_path: Path) -> None:
     assert "policy.model_name=bionemo/evo2_7b" in gdpo
 
 
-def test_existing_base_run_rejects_mid_run_switch_to_1m(tmp_path: Path) -> None:
-    """Historical result roots without a variant marker are known to be 7B-base runs."""
-    result_root = tmp_path / "existing-base"
+def test_resume_keeps_historical_unmarked_artifacts_on_7b_base(tmp_path: Path) -> None:
+    """Historical pre-marker result roots retain their established 7B-base interpretation."""
+    result_root = tmp_path / "unrecorded-model"
     (result_root / "state").mkdir(parents=True)
     (result_root / "state" / "selected-sft").write_text("/checkpoint/iter_0005200\n")
 
@@ -554,8 +756,65 @@ def test_existing_base_run_rejects_mid_run_switch_to_1m(tmp_path: Path) -> None:
             "bash",
             str(SCRIPT),
             "--dry-run",
+            "--resume-from",
+            "50",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    settings = json.loads((result_root / "settings.json").read_text())
+    assert settings["model_variant"] == "7b-base"
+    assert (result_root / "state/model-variant").read_text().strip() == "7b-base"
+
+
+def test_resume_uses_recorded_7b_1m_model_variant(tmp_path: Path) -> None:
+    result_root = tmp_path / "recorded-1m"
+    (result_root / "state").mkdir(parents=True)
+    (result_root / "state/model-variant").write_text("7b-1m\n")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
+            "--resume-from",
+            "50",
+            "--result-root",
+            str(result_root),
+        ],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    settings = json.loads((result_root / "settings.json").read_text())
+    assert settings["model_variant"] == "7b-1m"
+    assert settings["base_checkpoint"] == "evo2/7b-1m:1.0"
+    assert settings["model_size"] == "evo2_7b"
+
+
+def test_resume_rejects_explicit_model_variant_change(tmp_path: Path) -> None:
+    result_root = tmp_path / "recorded-1m"
+    (result_root / "state").mkdir(parents=True)
+    (result_root / "state/model-variant").write_text("7b-1m\n")
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(SCRIPT),
+            "--dry-run",
             "--model-variant",
-            "7b-1m",
+            "7b-base",
             "--result-root",
             str(result_root),
         ],
@@ -567,8 +826,7 @@ def test_existing_base_run_rejects_mid_run_switch_to_1m(tmp_path: Path) -> None:
     )
 
     assert completed.returncode == 2
-    assert "recorded model variant is 7b-base" in completed.stderr
-    assert "new result root" in completed.stderr
+    assert "recorded model variant is 7b-1m, not 7b-base" in completed.stderr
 
 
 def test_sampling_selection_override(tmp_path: Path) -> None:
@@ -598,23 +856,47 @@ def test_sampling_selection_override(tmp_path: Path) -> None:
     log = (result_root / "RUNLOG.md").read_text()
     assert "WARNING: copied explicit sampling selection" in log
     assert "using explicit sampling selection" in log
-    assert "sampling selection: temperature=0.9, prompt lengths=4 8 16 24, max new tokens=5800" in log
+    assert (
+        "sampling selection: temperature=0.9, prompt lengths=4 8 16 24, "
+        "anchors=left:100 right:4000, max new tokens=5800"
+    ) in log
     commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
+    calibration_scoring = next(
+        command for command in commands if "scripts/calibration/run_sampling_calibration_scoring.sh" in command
+    )
+    assert (
+        "SAFETY_ASSET_MANIFEST=" + str(RECIPE_ROOT / "data/external/safety/asset_manifest.yaml") in calibration_scoring
+    )
+    assert "SAFETY_POLICY=" + str(RECIPE_ROOT / "configs/phage_safety_policy.yaml") in calibration_scoring
+    assert "SAFETY_HOST_DOMAIN=BACTERIA" in calibration_scoring
+    safety_evidence_field = next(
+        field for field in calibration_scoring if field.startswith("SAFETY_HOST_EVIDENCE_JSON=")
+    )
+    calibration_evidence = json.loads(safety_evidence_field.partition("=")[2])
+    online_config = yaml.safe_load((RECIPE_ROOT / "configs/grpo_phage_megatron.yaml").read_text())
+    assert calibration_evidence == online_config["env"]["phage_qc"]["sequence_safety"]["host_evidence"]
     prompt_banks = [command for command in commands if command[:2] == ["evo2_phage_generation", "write-rl-prompts"]]
     assert len(prompt_banks) == 2
     assert all(
         command[command.index("--prompt-lengths") + 1 : command.index("--num-records")] == ["4", "8", "16", "24"]
         for command in prompt_banks
     )
-    assert prompt_banks[0][prompt_banks[0].index("--num-records") + 1] == "12"
+    assert prompt_banks[0][prompt_banks[0].index("--num-records") + 1] == "96"
     assert prompt_banks[1][prompt_banks[1].index("--num-records") + 1] == "96"
+    assert all(command.count("--prompt-anchor") == 2 for command in prompt_banks)
 
-    gdpo = next(command for command in commands if command[:1] == ["evo2_phage_run_gdpo"])
+    gdpo = next(
+        command
+        for command in commands
+        if command[:1] == ["evo2_phage_run_gdpo"]
+        and f"checkpointing.checkpoint_dir={result_root / 'rl/checkpoints'}" in command
+    )
     for override in (
         "policy.generation.max_new_tokens=5800",
         "policy.generation.temperature=0.9",
         "policy.generation.top_k=17",
         "policy.generation.top_p=0.85",
+        "policy.generation.mcore_generation_config.max_model_len=5888",
         "policy.generation.mcore_generation_config.generation_adapter_config.seed=101",
         "policy.generation.mcore_generation_config.generation_adapter_config.seed_stride=11",
     ):
@@ -628,7 +910,7 @@ def test_sampling_selection_override(tmp_path: Path) -> None:
         assert command[command.index("--top-k") + 1] == "17"
         assert command[command.index("--top-p") + 1] == "0.85"
         assert command[command.index("--seed") + 1] == str(7 + rank * 11)
-    assert "phix174_prompt4-8-16-24_temp0.9.n1000.fasta" in log
+    assert "phix174_prompt4-8-16-24-left-right_temp0.9.n1000.fasta" in log
 
 
 def test_calibrate_only_stops_after_scoring_for_sampling_review(tmp_path: Path) -> None:
@@ -669,6 +951,10 @@ def test_failure_footer_reports_stage_progress(tmp_path: Path) -> None:
     selection = result_root / "calibration/sampling-selection.yaml"
     selection.parent.mkdir(parents=True)
     selection.write_text("temperature: 0.9\n")
+    external_qc_scratch = tmp_path / "external-qc-scratch"
+    failed_batch = external_qc_scratch / "full/batch_failed"
+    failed_batch.mkdir(parents=True)
+    (failed_batch / "pipeline.log").write_text("failed evidence\n")
 
     completed = subprocess.run(
         [
@@ -681,6 +967,7 @@ def test_failure_footer_reports_stage_progress(tmp_path: Path) -> None:
             str(result_root),
         ],
         cwd=RECIPE_ROOT,
+        env={**os.environ, "RL_EXTERNAL_QC_WORK_ROOT": str(external_qc_scratch)},
         check=False,
         capture_output=True,
         text=True,
@@ -694,6 +981,12 @@ def test_failure_footer_reports_stage_progress(tmp_path: Path) -> None:
     )
     assert expected in completed.stderr
     assert expected in (result_root / "RUNLOG.md").read_text()
+    failure_archives = list((result_root / "failure-artifacts").glob("external-qc-stage-30-*.tar"))
+    assert len(failure_archives) == 1
+    with tarfile.open(failure_archives[0]) as archive:
+        retained_log = archive.extractfile("./full/batch_failed/pipeline.log")
+        assert retained_log is not None
+        assert retained_log.read() == b"failed evidence\n"
 
 
 def test_existing_sampling_selection_is_reused(tmp_path: Path) -> None:
@@ -777,7 +1070,7 @@ def test_substage_resume(tmp_path: Path) -> None:
     assert "substage 20-sft already complete" in log
     assert "monitor: SFT smoke" not in log
     assert "evo2_convert_nemo2_to_mbridge" not in log
-    assert "monitor: 12,000-step SFT" not in log
+    assert "monitor: SFT training" not in log
     assert "monitor: held-out SFT evaluation" in log
     assert "substage 30-calibration-generation already complete" in log
     assert "monitor: calibration generation" not in log
@@ -788,12 +1081,125 @@ def test_substage_resume(tmp_path: Path) -> None:
     assert "monitor: RL environment control" not in log
     assert "substage 50-rollout already complete" in log
     assert "evo2_phage_generation write-prompts" not in log
-    assert "--max-new-tokens 5976" not in log
+    assert "--max-new-tokens 5450" not in log
     assert "monitor: selected-SFT likelihood scoring" in log
-    assert "monitor: one-step GDPO pilot" not in log
+    assert "monitor: three-step post-validation GDPO pilot" not in log
     assert "monitor: 500-step DP8 GDPO" not in log
     assert "evo2_phage_monitor_objectives" in log
     assert "evo2_phage_sequence_safety scan" in log
+
+
+def test_stage20_reuses_valid_converted_base_without_download_or_conversion(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    (result_root / "state").mkdir(parents=True)
+    (result_root / "state/model-variant").write_text("7b-base\n")
+    _write_mbridge_checkpoint(result_root / "checkpoints/evo2-7b-8k-mbridge-10240")
+
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--resume-from", "20", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env={**os.environ, "PYTHONPATH": str(RECIPE_ROOT / "src")},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    assert "evo2_convert_nemo2_to_mbridge" not in log
+    assert "download_bionemo_data" not in log
+
+
+def test_stage20_rejects_incomplete_converted_base(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    (result_root / "state").mkdir(parents=True)
+    (result_root / "state/model-variant").write_text("7b-base\n")
+    (result_root / "checkpoints/evo2-7b-8k-mbridge-10240").mkdir(parents=True)
+
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--resume-from", "20", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env={**os.environ, "PYTHONPATH": str(RECIPE_ROOT / "src")},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert "converted base checkpoint is incomplete" in completed.stderr
+
+
+def test_stage20_smoke_marker_skips_smoke_but_runs_full_sft(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    stage_root = result_root / "stages"
+    stage_root.mkdir(parents=True)
+    (result_root / "state").mkdir()
+    (result_root / "state/model-variant").write_text("7b-base\n")
+    (stage_root / "20-sft-smoke.done").touch()
+
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--resume-from", "20", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    assert "monitor: SFT smoke" not in log
+    assert "monitor: SFT training" in log
+
+
+def test_stage40_reuses_validated_prepared_sft_without_source_state(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    (result_root / "state").mkdir(parents=True)
+    (result_root / "state/model-variant").write_text("7b-base\n")
+    prepared = _write_prepared_sft_checkpoint(result_root / "rl/sft-checkpoint")
+
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--resume-from", "40", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env={**os.environ, "PYTHONPATH": str(RECIPE_ROOT / "src")},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    assert "bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl" not in log
+    assert (result_root / "state/rl-sft-checkpoint").read_text().strip() == str(prepared)
+
+
+def test_stage50_validates_prepared_sft_before_likelihood(tmp_path: Path) -> None:
+    result_root = tmp_path / "result"
+    (result_root / "state").mkdir(parents=True)
+    (result_root / "state/model-variant").write_text("7b-base\n")
+    prepared = _write_prepared_sft_checkpoint(result_root / "rl/sft-checkpoint")
+
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--resume-from", "50", "--result-root", str(result_root)],
+        cwd=RECIPE_ROOT,
+        env={**os.environ, "PYTHONPATH": str(RECIPE_ROOT / "src")},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    log = (result_root / "RUNLOG.md").read_text()
+    likelihood = next(
+        shlex.split(line.partition("command: ")[2])
+        for line in log.splitlines()
+        if "command: torchrun " in line and "predict_evo2" in line
+    )
+    assert likelihood[likelihood.index("--ckpt-dir") + 1] == str(prepared)
 
 
 def test_stage40_pilot_marker_skips_pilot_but_runs_monitor_and_full_training(tmp_path: Path) -> None:
@@ -822,7 +1228,7 @@ def test_stage40_pilot_marker_skips_pilot_but_runs_monitor_and_full_training(tmp
     assert completed.returncode == 0, completed.stderr
     log = (result_root / "RUNLOG.md").read_text()
     assert "substage 40-pilot already complete" in log
-    assert "monitor: one-step GDPO pilot" not in log
+    assert "monitor: three-step post-validation GDPO pilot" not in log
     assert "evo2_phage_monitor_objectives" in log
     assert "monitor: 500-step DP8 GDPO" in log
 
@@ -924,6 +1330,9 @@ def test_topology_env(tmp_path: Path) -> None:
             **os.environ,
             "NUM_GPUS": "4",
             "NUM_CPUS": "48",
+            "FINAL_PROMPT_BATCH_SIZE": "24",
+            "RL_PROMPT_BATCH_SIZE": "96",
+            "RL_TRAIN_MICRO_BATCH_SIZE": "16",
             "SFT_TENSOR_PARALLEL_SIZE": "1",
             "NEMO_RL_RAY_NUM_CPUS": "",
         },
@@ -938,6 +1347,8 @@ def test_topology_env(tmp_path: Path) -> None:
     assert settings["gpu_count"] == 4
     assert settings["cpu_count"] == 48
     assert settings["sft_tensor_parallel_size"] == 1
+    assert settings["rl_train_micro_batch_size"] == 16
+    assert settings["final_prompt_batch_size"] == 24
     log = (result_root / "RUNLOG.md").read_text()
     commands = [shlex.split(line.partition("command: ")[2]) for line in log.splitlines() if "command: " in line]
     distributed = [command for command in commands if command[:1] == ["torchrun"] and "--nproc-per-node" in command]
@@ -950,5 +1361,26 @@ def test_topology_env(tmp_path: Path) -> None:
         command[1] for command in commands if command[:1] == ["env"] and command[1].startswith("CUDA_VISIBLE_DEVICES=")
     ]
     assert rollout == [f"CUDA_VISIBLE_DEVICES={rank}" for rank in range(4)]
+    rollout_commands = [command for command in commands if command[:1] == ["env"] and "--prompt-file" in command]
+    assert {command[command.index("--prompt-batch-size") + 1] for command in rollout_commands} == {"24"}
     assert "cluster.gpus_per_node=4" in log
     assert "RL Ray CPU slots: 48" in log
+    assert "policy.generation.mcore_generation_config.max_requests=96" in log
+    assert "policy.generation.mcore_generation_config.prompt_batch_size=96" in log
+    assert log.count("policy.train_micro_batch_size=16") == 3
+    assert "RL policy train microbatch: 16; native packed mixed-length decode group size: 96" in log
+
+
+def test_rejects_invalid_final_prompt_batch_size(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        ["bash", str(SCRIPT), "--dry-run", "--result-root", str(tmp_path / "result")],
+        cwd=RECIPE_ROOT,
+        env={**os.environ, "FINAL_PROMPT_BATCH_SIZE": "0"},
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert "FINAL_PROMPT_BATCH_SIZE must be a positive integer" in completed.stderr

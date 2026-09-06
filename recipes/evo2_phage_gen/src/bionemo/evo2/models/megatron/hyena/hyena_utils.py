@@ -57,12 +57,32 @@ except ImportError:
 
 
 try:
+    import subquadratic_ops_torch.causal_conv1d as _subq_causal_conv1d_module
     from subquadratic_ops_torch.b2b_causal_conv1d import b2b_causal_conv1d as _subq_b2b_causal_conv1d
     from subquadratic_ops_torch.causal_conv1d import causal_conv1d as _subq_causal_conv1d
     from subquadratic_ops_torch.fft_causal_conv1d import fft_causal_conv1d as _subq_fft_causal_conv1d
     from subquadratic_ops_torch.implicit_filter import implicit_filter
 
-    causal_conv1d = _subq_causal_conv1d
+    def causal_conv1d(*args, **kwargs):
+        """Call subquadratic causal conv, repairing its cuDNN import-order cache if needed.
+
+        subquadratic-ops-torch-cu13 0.3.0 resolves the NHW callable through
+        ``cudnn.ops.causal_conv1d``. Importing that same-named submodule later replaces the parent
+        package attribute with the module object, so a first use after that import order raises
+        ``TypeError: 'module' object is not callable``. The module still exposes the intended
+        callable; unwrap and cache it before retrying. Older package versions have no ``_NHW_OP``
+        cache and continue through the normal path unchanged.
+        """
+        try:
+            return _subq_causal_conv1d(*args, **kwargs)
+        except TypeError:
+            cached_op = getattr(_subq_causal_conv1d_module, "_NHW_OP", None)
+            repaired_op = getattr(cached_op, "causal_conv1d", None)
+            if callable(cached_op) or not callable(repaired_op):
+                raise
+            _subq_causal_conv1d_module._NHW_OP = repaired_op
+            return _subq_causal_conv1d(*args, **kwargs)
+
     b2b_causal_conv1d = _subq_b2b_causal_conv1d
     fft_causal_conv1d = _subq_fft_causal_conv1d
 except ImportError as e:

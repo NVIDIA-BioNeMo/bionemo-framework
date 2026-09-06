@@ -143,11 +143,11 @@ def assert_nemo_rl_runtime() -> None:
     """Check the small set of runtime capabilities used by this recipe."""
     if not _runtime_is_complete():
         raise RuntimeError("NeMo-RL is missing modules required by the Evo2 phage recipe")
+    nemo_rl_package = importlib.import_module("nemo_rl")
     grpo = importlib.import_module("nemo_rl.algorithms.grpo")
     logits_sampling = importlib.import_module("nemo_rl.algorithms.logits_sampling_utils")
     cluster = importlib.import_module("nemo_rl.distributed.virtual_cluster")
     dataset_utils = importlib.import_module("nemo_rl.data.datasets.utils")
-    generation_worker = importlib.import_module("nemo_rl.models.generation.megatron.megatron_worker")
     if not callable(getattr(grpo, "split_environment_timing_metrics", None)):
         raise RuntimeError("NeMo-RL is missing environment timing support")
     if not callable(getattr(dataset_utils, "resolve_external_dataset_class", None)):
@@ -155,11 +155,13 @@ def assert_nemo_rl_runtime() -> None:
     sampling_parameters = inspect.signature(logits_sampling.apply_top_k_top_p).parameters
     if "target_token_ids" not in sampling_parameters:
         raise RuntimeError("NeMo-RL cannot retain sampled actions in filtered log-probability support")
-    generation_mixin = getattr(generation_worker, "MegatronGenerationMixin", None)
-    if not callable(getattr(generation_mixin, "_generation_adapter_requires_persistent_model_storage", None)):
-        raise RuntimeError("NeMo-RL cannot preserve CUDA-graph model storage across colocated refits")
-    if not callable(getattr(generation_mixin, "_generation_adapter_model_refit_complete", None)):
-        raise RuntimeError("NeMo-RL cannot refresh quantized CUDA graphs after colocated refits")
+    # Importing the Megatron worker transitively loads Transformer Engine, which requires the
+    # driver library that BuildKit intentionally does not mount. Patch application is atomic,
+    # and source-level tests verify the corresponding worker/offload hooks directly.
+    if getattr(nemo_rl_package, "EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION", 0) < 2:
+        raise RuntimeError("NeMo-RL is missing required Evo2 colocated-refit lifecycle support")
+    if getattr(nemo_rl_package, "EVO2_RESPONSE_TERMINATION_VERSION", 0) < 1:
+        raise RuntimeError("NeMo-RL is missing exact generated-response termination support")
     parameters = inspect.signature(cluster.init_ray).parameters
     if not {"include_dashboard", "num_cpus"}.issubset(parameters):
         raise RuntimeError("NeMo-RL is missing local Ray resource controls")

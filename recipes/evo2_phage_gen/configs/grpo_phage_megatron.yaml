@@ -186,7 +186,7 @@ policy:
     port_range_low: 11001
     port_range_high: 15000
     backend: megatron
-    max_new_tokens: 5996
+    max_new_tokens: 5420
     temperature: 0.8
     top_p: 1.0
     top_k: null
@@ -238,8 +238,14 @@ data:
     env_name: phage_qc
 env:
   phage_qc:
-    genome_length_min: 4000
-    genome_length_max: 6000
+    genome_length_min: 5306
+    genome_length_max: 5493
+    # PhiX/Sinsheimervirus FASTA lengths (n=155) span 5,339-5,388 nt. The wider
+    # lower shaping taper reaches short rollouts; both default decode caps exceed upper zero.
+    genome_length_reward_lower_zero: 3000
+    genome_length_reward_lower_full: 5359
+    genome_length_reward_upper_full: 5391
+    genome_length_reward_upper_zero: 5426
     gc_content_min: 30.0
     gc_content_max: 65.0
     homopolymer_max: 10
@@ -259,6 +265,7 @@ env:
     weight_protein_hit_count: 1.0
     weight_tropism: 1.0
     weight_synteny: 0.25
+    weight_gene_a_origin: 0.25
     weight_average_protein_identity: 0.25
     weight_required_genes: 0.1
     sequence_safety:
@@ -299,7 +306,29 @@ env:
       synteny_mode: full
       enable_average_protein_identity: true
       enable_required_genes: true
-      required_genes_evidence_target: 9.0
+      required_genes_evidence_target: 10.0
+      protein_match_min_reciprocal_coverage: 0.75
+      tropism_match_min_reciprocal_coverage: 0.95
+      # Smooth rewards use permissive significant ORF hits; the hard Arc/LoVis gates remain unchanged.
+      enable_smooth_reference_rewards: true
+      synteny_identity_full_credit: 0.90
+      synteny_reciprocal_coverage_full_credit: 0.95
+      synteny_integrity_gamma: 1.5
+      synteny_raw_integrity_min: 0.001
+      synteny_min_credit: 0.01
+      synteny_order_weight: 0.75
+      synteny_duplicate_penalty_weight: 0.75
+      tropism_identity_full_credit: 0.95
+      tropism_reciprocal_coverage_full_credit: 0.99
+      tropism_integrity_gamma: 1.5
+      tropism_raw_integrity_min: 0.001
+      tropism_min_credit: 0.01
+      enable_gene_a_origin: true
+      gene_a_reference_locus: NC_001422.1_ORF.23
+      tropism_reference_locus: NC_001422.1_ORF.3
+      gene_a_origin_motif: CAACTTGATATTAATAACACTATAGACCAC
+      gene_a_origin_offset_nt: 345
+      gene_a_origin_offset_tolerance_nt: 30
       lovis4u_parallel_jobs: 12
       lovis4u_mmseqs_threads: 8
       lovis4u_metrics_only: true

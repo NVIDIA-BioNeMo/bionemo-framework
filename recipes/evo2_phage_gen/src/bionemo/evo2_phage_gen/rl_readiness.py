@@ -592,8 +592,37 @@ def _validate_control_support(row: dict[str, Any], environment: Any) -> dict[str
     return support
 
 
+def _comparable_control_metrics(row: dict[str, Any]) -> dict[str, object]:
+    """Return reward, filter, and measurement outcomes that must be origin-invariant."""
+    metrics: dict[str, object] = {}
+    for name, value in row.items():
+        if name.endswith("_cluster_deduplicated_pass"):
+            # This is a set-relative representative choice, not an intrinsic genome outcome.
+            continue
+        if not (
+            name == "reward"
+            or name.startswith(("reward_", "valid_"))
+            or name.endswith(
+                (
+                    "_pass",
+                    "_measurement_available",
+                    "_tool_succeeded",
+                    "_environment_healthy",
+                    "_state",
+                    "_execution_status",
+                )
+            )
+        ):
+            continue
+        if isinstance(value, Real) and not isinstance(value, bool):
+            metrics[name] = float(value) if math.isfinite(float(value)) else None
+        elif value is None or isinstance(value, (bool, str)):
+            metrics[name] = value
+    return metrics
+
+
 def run_environment_control(config_path: Path, control_fasta: Path, output_dir: Path) -> dict[str, Any]:
-    """Run one known viable genome through the exact configured NeMo-RL environment."""
+    """Run one genome or equivalent circular rotations through the exact RL environment."""
     from bionemo.evo2_phage_gen import nemo_rl_env
     from bionemo.evo2_phage_gen.generation import DEFAULT_PROMPT_PREFIX
     from bionemo.evo2_phage_gen.sequence_safety_cli import parse_fasta_records
@@ -607,12 +636,17 @@ def run_environment_control(config_path: Path, control_fasta: Path, output_dir: 
         raise RLEnvironmentControlError("exact environment control requires GDPO reward output")
 
     records = parse_fasta_records(control_fasta)
-    if len(records) != 1:
-        raise RLEnvironmentControlError("control FASTA must contain exactly one genome")
-    record = records[0]
+    if not records:
+        raise RLEnvironmentControlError("control FASTA must contain at least one genome")
+    baseline_sequence = records[0].sequence
+    doubled_baseline = baseline_sequence + baseline_sequence
+    if any(
+        len(record.sequence) != len(baseline_sequence) or record.sequence not in doubled_baseline for record in records
+    ):
+        raise RLEnvironmentControlError("multi-record control FASTA must contain equivalent circular rotations")
     prefix_length = 16
-    if len(record.sequence) <= prefix_length:
-        raise RLEnvironmentControlError("control genome must be longer than the 16-base RL prompt")
+    if any(len(record.sequence) <= prefix_length for record in records):
+        raise RLEnvironmentControlError("each control genome must be longer than the 16-base RL prompt")
 
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -639,36 +673,68 @@ def run_environment_control(config_path: Path, control_fasta: Path, output_dir: 
             {"role": "user", "content": DEFAULT_PROMPT_PREFIX + record.sequence[:prefix_length]},
             {"role": "assistant", "content": record.sequence[prefix_length:]},
         ]
+        for record in records
     ]
-    environment_result = environment_class.step(environment, messages, [{"record_id": record.sequence_id}])
-    if environment_result.answers != [record.sequence]:
+    metadata = [{"record_id": record.sequence_id} for record in records]
+    environment_result = environment_class.step(environment, messages, metadata)
+    if environment_result.answers != [record.sequence for record in records]:
         raise RLEnvironmentControlError("exact environment did not reconstruct the complete control genome")
-    if len(environment_result.metadata) != 1:
+    if len(environment_result.metadata) != len(records):
         raise RLEnvironmentControlError("exact environment returned the wrong control result count")
-    scored = environment_result.metadata[0].get("_phage_qc_scored")
-    if not isinstance(scored, dict):
+    scored_rows = [item.get("_phage_qc_scored") for item in environment_result.metadata]
+    if any(not isinstance(scored, dict) for scored in scored_rows):
         raise RLEnvironmentControlError("exact environment did not return component telemetry")
 
     reward_rows = environment_result.rewards.detach().cpu().tolist()
-    if len(reward_rows) != 1 or not isinstance(reward_rows[0], list):
-        raise RLEnvironmentControlError("exact environment did not return one GDPO reward vector")
+    if len(reward_rows) != len(records) or any(not isinstance(row, list) for row in reward_rows):
+        raise RLEnvironmentControlError("exact environment returned the wrong number of GDPO reward vectors")
     objective_names = [objective.name for objective in environment.gdpo_objectives]
-    if len(reward_rows[0]) != len(objective_names):
+    if any(len(row) != len(objective_names) for row in reward_rows):
         raise RLEnvironmentControlError("GDPO reward vector does not match the configured objectives")
-    objective_values = {
-        name: _bounded_control_value(value, f"objective {name}")
-        for name, value in zip(objective_names, reward_rows[0], strict=True)
-    }
-    for objective in environment.gdpo_objectives:
-        for column in objective.columns:
-            _bounded_control_value(scored.get(column), column)
+    control_rows = []
+    for record, rewards, scored in zip(records, reward_rows, scored_rows, strict=True):
+        objective_values = {
+            name: _bounded_control_value(value, f"objective {name}")
+            for name, value in zip(objective_names, rewards, strict=True)
+        }
+        for objective in environment.gdpo_objectives:
+            for column in objective.columns:
+                _bounded_control_value(scored.get(column), column)
+        control_rows.append(
+            {
+                "record_id": record.sequence_id,
+                "sequence_length": len(record.sequence),
+                "objectives": objective_values,
+                "support": _validate_control_support(scored, environment),
+                "metrics": _comparable_control_metrics(scored),
+            }
+        )
 
-    result: dict[str, Any] = {
-        "record_id": record.sequence_id,
-        "sequence_length": len(record.sequence),
-        "objectives": objective_values,
-        "support": _validate_control_support(scored, environment),
-    }
+    baseline = control_rows[0]
+    for row in control_rows[1:]:
+        if row["objectives"] != baseline["objectives"]:
+            raise RLEnvironmentControlError(f"GDPO objectives differ for circular rotation {row['record_id']}")
+        if row["support"] != baseline["support"]:
+            raise RLEnvironmentControlError(f"measurement support differs for circular rotation {row['record_id']}")
+        if row["metrics"] != baseline["metrics"]:
+            differing = sorted(
+                name
+                for name in set(row["metrics"]) | set(baseline["metrics"])
+                if row["metrics"].get(name) != baseline["metrics"].get(name)
+            )
+            raise RLEnvironmentControlError(
+                f"component metrics differ for circular rotation {row['record_id']}: {', '.join(differing)}"
+            )
+
+    if len(control_rows) == 1:
+        result: dict[str, Any] = {key: value for key, value in baseline.items() if key != "metrics"}
+    else:
+        result = {
+            "schema_version": 2,
+            "rotation_invariant": True,
+            "compared_metric_count": len(baseline["metrics"]),
+            "records": [{key: value for key, value in row.items() if key != "metrics"} for row in control_rows],
+        }
     (output_dir / "result.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     return result
 

@@ -771,7 +771,7 @@
                                       input_csv=f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}',
 -                                     output_csv=f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}')
 +                                     output_csv=f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}',
-+                                     reference_gff_path=config.get("reference_genome_gff_file_save_location") if config.get("allow_gff_product_order_synteny_fallback", False) else None)
++                                     reference_gff_path=config.get("reference_genome_gff_file_save_location"))
              count_total_num_genes(f'{config["results_save_dir"]}/{config["gff_dir_save_location"]}',
                                    f'{config["results_save_dir"]}/{config["synteny_filter_seqs_csv_file_save_location"]}')
 +            shutil.copyfile(

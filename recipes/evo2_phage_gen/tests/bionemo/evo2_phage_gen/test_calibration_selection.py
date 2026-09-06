@@ -21,6 +21,14 @@ import pytest
 from bionemo.evo2_phage_gen.calibration_selection import build_selection_table, summarize_setting
 
 
+def _with_healthy_safety(frame: pd.DataFrame) -> pd.DataFrame:
+    for safety_class in ("amr", "toxin", "lysogeny"):
+        frame[f"safety_{safety_class}_measurement_available"] = 1.0
+        frame[f"safety_{safety_class}_execution_status"] = "COMPLETED_AND_PARSED"
+        frame[f"safety_{safety_class}_reason_codes"] = "[]"
+    return frame
+
+
 def test_summarize_setting_clusters_only_rows_in_that_setting(tmp_path):
     path = tmp_path / "prefix4_temp1.0.scores.csv"
     scored = pd.DataFrame(
@@ -30,6 +38,7 @@ def test_summarize_setting_clusters_only_rows_in_that_setting(tmp_path):
             "reward_external_tropism": [1.0, 0.0],
             "reward_external_required_genes": [0.5, 0.5],
             "reward_external_synteny": [0.7, 0.1],
+            "reward_gene_a_origin": [0.6, 0.2],
             "reward_external_average_protein_identity": [1.0, 1.0],
             "reward_binary_full_qc_pass": [1.0, 0.0],
             "reward_binary_full_qc_cluster_deduplicated_pass": [1.0, 0.0],
@@ -38,13 +47,14 @@ def test_summarize_setting_clusters_only_rows_in_that_setting(tmp_path):
             "tropism_measurement_available": [1.0, 1.0],
             "required_genes_measurement_available": [1.0, 1.0],
             "synteny_measurement_available": [1.0, 1.0],
+            "smooth_reference_measurement_available": [1.0, 1.0],
             "average_protein_identity_measurement_available": [1.0, 1.0],
             "mmseqs_cluster_num_clusters": [1, 1],
             "mmseqs_cluster_valid_for_clustering": [1.0, 1.0],
             "mmseqs_cluster_is_singleton": [0.0, 0.0],
         }
     )
-    scored.to_csv(path, index=False)
+    _with_healthy_safety(scored).to_csv(path, index=False)
 
     summary = summarize_setting(path, bootstrap_replicates=100)
 
@@ -52,6 +62,8 @@ def test_summarize_setting_clusters_only_rows_in_that_setting(tmp_path):
     assert summary["within_setting_clusterable_count"] == 2
     assert summary["within_setting_99pct_distinct_rate"] == 0.5
     assert summary["target_signal_mean"] == pytest.approx(7 / 12)
+    assert summary["all_external_measurements_available_rate"] == 1.0
+    assert summary["gene_a_origin_reward_mean"] == pytest.approx(0.4)
 
 
 def test_summarize_setting_marks_header_only_scores_ineligible(tmp_path):
@@ -63,6 +75,33 @@ def test_summarize_setting_marks_header_only_scores_ineligible(tmp_path):
     assert summary["records"] == 0
     assert summary["metric_environment_ok"] is False
     assert summary["within_setting_99pct_cluster_count"] == 0
+
+
+def test_summarize_setting_rejects_unexplained_missing_safety_evidence(tmp_path):
+    path = tmp_path / "prefix4_temp1.0.scores.csv"
+    pd.DataFrame(
+        {
+            "external_qc_tool_succeeded": [1.0],
+            "protein_database_hit_count_measurement_available": [1.0],
+            "tropism_measurement_available": [1.0],
+            "required_genes_measurement_available": [1.0],
+            "synteny_measurement_available": [1.0],
+            "average_protein_identity_measurement_available": [1.0],
+            "safety_amr_measurement_available": [1.0],
+            "safety_amr_execution_status": ["COMPLETED_AND_PARSED"],
+            "safety_amr_reason_codes": ["[]"],
+            "safety_toxin_measurement_available": [0.0],
+            "safety_toxin_execution_status": ["NOT_STARTED"],
+            "safety_toxin_reason_codes": ['["TOXIN_SCORER_NOT_STARTED"]'],
+            "safety_lysogeny_measurement_available": [1.0],
+            "safety_lysogeny_execution_status": ["COMPLETED_AND_PARSED"],
+            "safety_lysogeny_reason_codes": ["[]"],
+        }
+    ).to_csv(path, index=False)
+
+    summary = summarize_setting(path, bootstrap_replicates=10)
+
+    assert summary["metric_environment_ok"] is False
 
 
 def test_build_selection_table_records_configurable_comparability_margin(tmp_path):
@@ -82,7 +121,7 @@ def test_build_selection_table_records_configurable_comparability_margin(tmp_pat
             "average_protein_identity_measurement_available": [1.0],
         }
     )
-    frame.to_csv(score_dir / "prefix4_temp1.0.scores.csv", index=False)
+    _with_healthy_safety(frame).to_csv(score_dir / "prefix4_temp1.0.scores.csv", index=False)
 
     table = build_selection_table(score_dir, bootstrap_replicates=100, comparability_margin=0.02)
 

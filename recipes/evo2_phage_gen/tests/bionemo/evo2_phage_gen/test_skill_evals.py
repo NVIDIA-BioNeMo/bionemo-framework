@@ -175,6 +175,8 @@ def test_rl_skills_keep_cross_stage_contracts() -> None:
     assert "global rollout batch" in calibrate
     assert "regions intended to change" in calibrate
     assert "temperature, then top-k, then top-p" in calibrate
+    assert "cumulative renormalized top-k mass strictly before EOD" in calibrate
+    assert "design-specific reachability requirement" in calibrate
     assert "training rollouts" in monitor
     assert "fixed validation bank" in monitor
     assert "prompt composition" in monitor
@@ -271,6 +273,9 @@ def test_rl_prompt_and_control_evals_cover_the_new_contract() -> None:
         case["id"] for case in plan["evals"]
     }
     assert "bionemo-phage-design-implement-rl-objectives-007-biological-controls" in {
+        case["id"] for case in implement["evals"]
+    }
+    assert "bionemo-phage-design-implement-rl-objectives-009-independent-measurement" in {
         case["id"] for case in implement["evals"]
     }
     assert "bionemo-phage-design-calibrate-rl-sampling-008-circular-editable-regions" in {

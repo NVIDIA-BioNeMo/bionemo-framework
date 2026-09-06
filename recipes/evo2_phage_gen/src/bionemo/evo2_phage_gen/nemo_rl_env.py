@@ -71,7 +71,6 @@ DEFAULT_GDPO_OBJECTIVES: tuple[GDPOObjective, ...] = (
             "reward_gc_content",
             "reward_nt_homopolymer",
             "reward_dustmask_end",
-            "reward_nucleotide_pass",
         ),
     ),
     GDPOObjective(
@@ -80,6 +79,7 @@ DEFAULT_GDPO_OBJECTIVES: tuple[GDPOObjective, ...] = (
             "reward_external_protein_hit_count",
             "reward_external_tropism",
             "reward_external_required_genes",
+            "reward_gene_a_origin",
         ),
     ),
     GDPOObjective(name="architecture", columns=("reward_external_synteny",)),
@@ -595,6 +595,15 @@ def phage_qc_metrics_from_scored(scored: pd.DataFrame, weights: RewardWeights) -
         "synteny_pair_distance",
         "synteny_total_gene_score",
         "synteny_proxy_hit_gene_count",
+        "synteny_smooth_content_score",
+        "synteny_smooth_ordered_score",
+        "synteny_smooth_duplicate_score",
+        "smooth_reference_matched_loci",
+        "smooth_reference_best_integrity",
+        "gene_a_origin_motif_score",
+        "gene_a_origin_position_score",
+        "gene_a_origin_exact_functional_site",
+        "gene_a_origin_strong_site_count",
         "average_protein_percent_identity",
         "average_protein_identity_gene_count",
         "average_protein_identity_raw_score",
@@ -779,8 +788,21 @@ def _batch_metadata_is_complete(
 
 
 if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
-
-    @ray.remote(max_restarts=3, max_task_retries=3, max_concurrency=1000)
+    # NeMo-RL sends one already-batched call per task type. A large threaded-actor
+    # pool creates hundreds of glibc arenas and retains their high-water RSS across
+    # rollout steps without adding phage-QC parallelism.
+    @ray.remote(
+        max_restarts=3,
+        max_task_retries=3,
+        max_concurrency=1,
+        runtime_env={
+            "env_vars": {
+                "CUDA_VISIBLE_DEVICES": "",
+                "PHAGEHOSTLEARN_CUDA_VISIBLE_DEVICES": "",
+                "PHAGEHOSTLEARN_ESM_DEVICE": "cpu",
+            }
+        },
+    )
     class PhageQCEnvironment(EnvironmentInterface[dict[str, Any]]):
         """Single-turn NeMo-RL environment for phage sequence QC reward."""
 
@@ -790,6 +812,26 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
             self.config = NucleotideQCConfig(
                 genome_length_min=int(cfg.get("genome_length_min", 4000)),
                 genome_length_max=int(cfg.get("genome_length_max", 6000)),
+                genome_length_reward_lower_zero=(
+                    float(cfg["genome_length_reward_lower_zero"])
+                    if cfg.get("genome_length_reward_lower_zero") is not None
+                    else None
+                ),
+                genome_length_reward_lower_full=(
+                    float(cfg["genome_length_reward_lower_full"])
+                    if cfg.get("genome_length_reward_lower_full") is not None
+                    else None
+                ),
+                genome_length_reward_upper_full=(
+                    float(cfg["genome_length_reward_upper_full"])
+                    if cfg.get("genome_length_reward_upper_full") is not None
+                    else None
+                ),
+                genome_length_reward_upper_zero=(
+                    float(cfg["genome_length_reward_upper_zero"])
+                    if cfg.get("genome_length_reward_upper_zero") is not None
+                    else None
+                ),
                 gc_content_min=float(cfg.get("gc_content_min", 30.0)),
                 gc_content_max=float(cfg.get("gc_content_max", 65.0)),
                 homopolymer_max=int(cfg.get("homopolymer_max", 10)),
@@ -813,6 +855,7 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 protein_hit_count=float(cfg.get("weight_protein_hit_count", 0.0)),
                 tropism=float(cfg.get("weight_tropism", 0.0)),
                 synteny=float(cfg.get("weight_synteny", 0.0)),
+                gene_a_origin=float(cfg.get("weight_gene_a_origin", 0.0)),
                 average_protein_identity=float(cfg.get("weight_average_protein_identity", 0.0)),
                 required_genes=float(cfg.get("weight_required_genes", 0.0)),
                 mmseqs_cluster_diversity=float(cfg.get("weight_mmseqs_cluster_diversity", 0.0)),
@@ -851,7 +894,36 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 synteny_mode=str(external_qc_cfg.get("synteny_mode", "proxy")),
                 enable_average_protein_identity=bool(external_qc_cfg.get("enable_average_protein_identity", False)),
                 enable_required_genes=bool(external_qc_cfg.get("enable_required_genes", False)),
-                required_genes_evidence_target=float(external_qc_cfg.get("required_genes_evidence_target", 9.0)),
+                required_genes_evidence_target=float(external_qc_cfg.get("required_genes_evidence_target", 10.0)),
+                protein_match_min_reciprocal_coverage=float(
+                    external_qc_cfg.get("protein_match_min_reciprocal_coverage", 0.75)
+                ),
+                tropism_match_min_reciprocal_coverage=float(
+                    external_qc_cfg.get("tropism_match_min_reciprocal_coverage", 0.95)
+                ),
+                enable_smooth_reference_rewards=bool(external_qc_cfg.get("enable_smooth_reference_rewards", False)),
+                enable_gene_a_origin=bool(external_qc_cfg.get("enable_gene_a_origin", False)),
+                synteny_identity_full_credit=float(external_qc_cfg.get("synteny_identity_full_credit", 0.90)),
+                synteny_reciprocal_coverage_full_credit=float(
+                    external_qc_cfg.get("synteny_reciprocal_coverage_full_credit", 0.95)
+                ),
+                synteny_integrity_gamma=float(external_qc_cfg.get("synteny_integrity_gamma", 1.5)),
+                synteny_raw_integrity_min=float(external_qc_cfg.get("synteny_raw_integrity_min", 0.001)),
+                synteny_min_credit=float(external_qc_cfg.get("synteny_min_credit", 0.01)),
+                synteny_order_weight=float(external_qc_cfg.get("synteny_order_weight", 0.75)),
+                synteny_duplicate_penalty_weight=float(external_qc_cfg.get("synteny_duplicate_penalty_weight", 0.75)),
+                tropism_identity_full_credit=float(external_qc_cfg.get("tropism_identity_full_credit", 0.95)),
+                tropism_reciprocal_coverage_full_credit=float(
+                    external_qc_cfg.get("tropism_reciprocal_coverage_full_credit", 0.99)
+                ),
+                tropism_integrity_gamma=float(external_qc_cfg.get("tropism_integrity_gamma", 1.5)),
+                tropism_raw_integrity_min=float(external_qc_cfg.get("tropism_raw_integrity_min", 0.001)),
+                tropism_min_credit=float(external_qc_cfg.get("tropism_min_credit", 0.01)),
+                gene_a_reference_locus=str(external_qc_cfg.get("gene_a_reference_locus", "NC_001422.1_ORF.23")),
+                tropism_reference_locus=str(external_qc_cfg.get("tropism_reference_locus", "NC_001422.1_ORF.3")),
+                gene_a_origin_motif=str(external_qc_cfg.get("gene_a_origin_motif", "CAACTTGATATTAATAACACTATAGACCAC")),
+                gene_a_origin_offset_nt=int(external_qc_cfg.get("gene_a_origin_offset_nt", 345)),
+                gene_a_origin_offset_tolerance_nt=int(external_qc_cfg.get("gene_a_origin_offset_tolerance_nt", 30)),
                 lovis4u_parallel_jobs=external_qc_cfg.get("lovis4u_parallel_jobs", 12),
                 lovis4u_chunk_size=external_qc_cfg.get("lovis4u_chunk_size"),
                 lovis4u_mmseqs_threads=external_qc_cfg.get("lovis4u_mmseqs_threads"),
@@ -869,6 +941,7 @@ if _NEMO_RL_IMPORT_ERROR is None:  # pragma: no cover
                 cov_mode=int(mmseqs_cfg.get("cov_mode", 0)),
                 seq_id_mode=int(mmseqs_cfg.get("seq_id_mode", 0)),
                 cluster_mode=int(mmseqs_cfg.get("cluster_mode", 0)),
+                parallel_jobs=int(mmseqs_cfg.get("parallel_jobs", 1)),
                 threads=mmseqs_cfg.get("threads"),
                 verbosity=int(mmseqs_cfg.get("verbosity", 0)),
             )

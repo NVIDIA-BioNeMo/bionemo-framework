@@ -24,7 +24,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from bionemo.evo2_phage_gen.calibration_scoring import CELL_RE, EXTERNAL_OBJECTIVES
+from bionemo.evo2_phage_gen.calibration_scoring import (
+    CELL_RE,
+    EXTERNAL_OBJECTIVES,
+    EXTERNAL_SUPPORT_COLUMNS,
+    safety_objective_interpretability,
+)
 
 
 def _numeric(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -48,8 +53,8 @@ def summarize_setting(path: Path, *, bootstrap_seed: int = 174, bootstrap_replic
     cell = path.name.removesuffix(".scores.csv")
     match = CELL_RE.fullmatch(cell)
     cell_seed = bootstrap_seed + int(hashlib.sha256(cell.encode()).hexdigest()[:8], 16)
-    support_columns = [f"{prefix}_measurement_available" for prefix in EXTERNAL_OBJECTIVES.values()]
-    support = pd.concat([_numeric(scored, column) for column in support_columns], axis=1).min(axis=1)
+    support = pd.concat([_numeric(scored, column) for column in EXTERNAL_SUPPORT_COLUMNS], axis=1).min(axis=1)
+    safety_environment_ok = bool(len(scored) and safety_objective_interpretability(scored).all().all())
     target_signal = pd.concat(
         [
             _numeric(scored, "reward_external_protein_hit_count"),
@@ -67,10 +72,13 @@ def summarize_setting(path: Path, *, bootstrap_seed: int = 174, bootstrap_replic
     cluster_count = _numeric(scored, "mmseqs_cluster_num_clusters").max()
     row: dict[str, float | int | str | bool] = {
         "cell": cell,
+        "prompt_anchor": match.group("anchor") if match and match.group("anchor") else "origin",
         "prefix_length": int(match.group("prefix")) if match else -1,
         "temperature": float(match.group("temperature")) if match else float("nan"),
         "records": len(scored),
-        "metric_environment_ok": bool(len(scored) and (_numeric(scored, "external_qc_tool_succeeded") == 1.0).all()),
+        "metric_environment_ok": bool(
+            len(scored) and (_numeric(scored, "external_qc_tool_succeeded") == 1.0).all() and safety_environment_ok
+        ),
         "all_external_measurements_available_rate": float(support.mean()),
         "within_setting_99pct_cluster_count": int(cluster_count) if pd.notna(cluster_count) else 0,
         "within_setting_clusterable_count": int(_numeric(scored, "mmseqs_cluster_valid_for_clustering").sum()),
@@ -89,8 +97,8 @@ def summarize_setting(path: Path, *, bootstrap_seed: int = 174, bootstrap_replic
         row[f"{name}_mean"] = float(array.mean()) if len(array) else 0.0
         row[f"{name}_ci_low"] = low
         row[f"{name}_ci_high"] = high
-    for objective in EXTERNAL_OBJECTIVES:
-        row[f"{objective}_reward_mean"] = float(_numeric(scored, f"reward_external_{objective}").mean())
+    for objective, (reward_column, _support_column) in EXTERNAL_OBJECTIVES.items():
+        row[f"{objective}_reward_mean"] = float(_numeric(scored, reward_column).mean())
     return row
 
 
@@ -132,7 +140,7 @@ def build_selection_table(
         & table["reward_practically_comparable"]
         & table["target_signal_practically_comparable"]
     )
-    return table.sort_values(["temperature", "prefix_length"]).reset_index(drop=True)
+    return table.sort_values(["temperature", "prefix_length", "prompt_anchor"]).reset_index(drop=True)
 
 
 def _parse_args() -> argparse.Namespace:

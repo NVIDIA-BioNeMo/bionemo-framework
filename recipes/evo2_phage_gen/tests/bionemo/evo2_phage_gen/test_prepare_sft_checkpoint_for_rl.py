@@ -111,6 +111,13 @@ def test_prepare_builds_reusable_rl_checkpoint(tmp_path: Path, monkeypatch) -> N
     assert prepare_sft_checkpoint_for_rl.prepare_sft_checkpoint_for_rl(source_root, output) == prepared
     assert len(calls) == 1
 
+    shutil.rmtree(source_root)
+    assert prepare_sft_checkpoint_for_rl.validate_prepared_sft_checkpoint(output) == prepared
+
+    relocated = tmp_path / "relocated-sft-checkpoint"
+    output.rename(relocated)
+    assert prepare_sft_checkpoint_for_rl.validate_prepared_sft_checkpoint(relocated) == (relocated / "iter_0005200")
+
 
 def test_existing_prepared_checkpoint_rejects_changed_source(tmp_path: Path, monkeypatch) -> None:
     source_root = tmp_path / "source"

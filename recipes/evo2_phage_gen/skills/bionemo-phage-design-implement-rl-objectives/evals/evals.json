@@ -21,6 +21,7 @@
       "expected_output": "A portfolio-level behavior check in addition to component tests.",
       "assertions": [
         "The response checks duplicated evidence, incompatible directions, scale dominance, sparse support, and combinations that reward the wrong biological endpoint.",
+        "For GDPO or GRPO per-objective normalization, it detects near-constant reward columns where a 47-versus-1 split in a batch of 48 produces an absolute z-score near 6.8 regardless of raw effect size, and floors sigma or collapses saturated columns so they cannot dominate well-spread objectives.",
         "It evaluates reference, random or baseline, desired, and counterexample genomes at component and aggregate levels.",
         "It keeps component values and denominators visible rather than validating only the weighted sum.",
         "Tests cover gaming cases and confirm online rewards agree with final QC where promised.",
@@ -97,6 +98,33 @@
         "Where circular equivalence should hold, rotations and reverse complements preserve the expected result.",
         "Boundary, empty, invalid, missing-evidence, no-hit, and tool-failure cases cannot receive accidental positive credit.",
         "The exact installed scoring path and combined portfolio run the controls so a skipped component cannot hide behind aggregate reward."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-008-partial-protein-hits",
+      "prompt": "A protein reward counts high-identity MMseqs hits, but many align only a short fragment and duplicate ORFs can hit the same family. AAI also averages every hit. Harden the online reward and final QC.",
+      "expected_output": "Coverage-aware, duplicate-safe protein evidence with aligned online and hard-QC semantics.",
+      "assertions": [
+        "The scorer retains alignment, query, and target lengths and reports reciprocal coverage rather than treating identity alone as gene presence.",
+        "Partial called-ORF hits may receive bounded dense credit only above a shuffled-sequence null, with smooth significance, identity, and bidirectional-coverage progress; intact-gene hard gates remain independent and require their configured query and target coverage.",
+        "Distinct-family counts and family-level AAI use one best coverage-qualified hit per target family so duplicate ORFs and fragments cannot inflate evidence, and thresholds are calibrated for exact targets versus profile consensuses.",
+        "Missing alignment-length evidence fails closed rather than falling back to raw hit counts.",
+        "Focused tests include full-length, truncated, duplicate-family, missing-evidence, and overlapping or embedded-gene cases and compare online scoring with final QC."
+      ],
+      "expected_skill": "bionemo-phage-design-implement-rl-objectives",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-implement-rl-objectives-009-independent-measurement",
+      "prompt": "A generated genome is one nucleotide below the final length gate but otherwise tool-safe. Arc currently removes it before ORF calling and fills its protein and synteny measurements with zero. Fix the online behavior without weakening final acceptance.",
+      "expected_output": "Independent biological measurements plus a separate failed length gate.",
+      "assertions": [
+        "A tool-safe short genome still receives ORF, protein, and architecture measurements rather than fabricated zeroes.",
+        "The graded length reward and binary final length acceptance remain separate.",
+        "Final acceptance still rejects the genome outside the configured hard length interval.",
+        "Empty, malformed, or tool-failed genomes remain isolated and receive explicit zero credit where measurement is impossible."
       ],
       "expected_skill": "bionemo-phage-design-implement-rl-objectives",
       "expected_script": null

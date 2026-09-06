@@ -33,7 +33,7 @@ selection handoff, and restart markers. Use its workflow when compatible, but do
 same shell launch or topology fits a different GPU or scheduler environment; adapt execution from
 measured hardware while preserving scientific semantics and durable stage boundaries. If the
 example stops for sampling review, inspect the completed evidence and follow the calibration
-skill's handoff rather than selecting the bundled historical default on the agent's own initiative.
+skill's handoff rather than selecting the bundled default on the agent's own initiative.
 Treat the top-level PhiX script as a reference implementation of the realized DAG. For a rerun, an
 agent may run it directly, adapt or wrap it for custom settings and deliberate decision points, or
 compose the stage subskills through another scheduler. Use the example README and dependency DAG

@@ -7,12 +7,16 @@
 set -Eeuo pipefail
 
 RECIPE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-RESULT_ROOT="${RECIPE_ROOT}/results/phix174-8xh100"
+RESULT_ROOT="${RECIPE_ROOT}/results/phix174-8xh100-mixed-anchors"
 DRY_RUN=0
 PREPARE_ONLY=0
 CALIBRATE_ONLY=0
 RESUME_FROM=00
 SAMPLING_SELECTION_SOURCE=
+MODEL_VARIANT_EXPLICIT=0
+if [[ -v MODEL_VARIANT && -n "${MODEL_VARIANT}" ]]; then
+  MODEL_VARIANT_EXPLICIT=1
+fi
 MODEL_VARIANT="${MODEL_VARIANT:-7b-base}"
 HOPPER_FP8_INFERENCE=0
 WANDB_ENABLED=0
@@ -20,8 +24,15 @@ WANDB_OPTION_CONFIGURED=0
 WANDB_ENTITY_NAME="${WANDB_ENTITY:-}"
 WANDB_SFT_PROJECT_NAME='evo2-phage-design-sft'
 WANDB_RL_PROJECT_NAME='evo2-phage-design-gdpo'
+WANDB_INIT_TIMEOUT="${WANDB_INIT_TIMEOUT:-300}"
 NUM_GPUS="${NUM_GPUS:-8}"
-NUM_CPUS="${NUM_CPUS:-${NEMO_RL_RAY_NUM_CPUS:-$(nproc)}}"
+# Detect availability outside tool-specific OpenMP limits, then reserve H100 host headroom.
+AVAILABLE_CPUS="$(env -u OMP_NUM_THREADS -u OMP_THREAD_LIMIT nproc)"
+DEFAULT_NUM_CPUS=150
+if ((AVAILABLE_CPUS < DEFAULT_NUM_CPUS)); then
+  DEFAULT_NUM_CPUS="${AVAILABLE_CPUS}"
+fi
+NUM_CPUS="${NUM_CPUS:-${NEMO_RL_RAY_NUM_CPUS:-${DEFAULT_NUM_CPUS}}}"
 for resource_name in NUM_GPUS NUM_CPUS; do
   resource_value="${!resource_name}"
   if [[ ! "${resource_value}" =~ ^[1-9][0-9]*$ ]]; then
@@ -50,19 +61,55 @@ for ((gpu_index=0; gpu_index<NUM_GPUS; gpu_index++)); do
   GPU_IDS+="${GPU_IDS:+ }${gpu_index}"
 done
 MONITOR_INTERVAL_SECONDS="${MONITOR_INTERVAL_SECONDS:-600}"
+SFT_MAX_STEPS="${SFT_MAX_STEPS:-12000}"
 PHAROKKA_DATABASE_URL="${PHAROKKA_DATABASE_URL:-https://zenodo.org/records/21755221/files/pharokka_v1.11.0_databases.tar.gz?download=1}"
 PHAROKKA_DATABASE_MD5="${PHAROKKA_DATABASE_MD5:-143bb375ddb0b0653e5cb5671f4a7629}"
 PHAROKKA_DATABASE_RELEASE="${PHAROKKA_DATABASE_RELEASE:-Pharokka database v1.11.0 / PHROGs v4}"
 CALIBRATION_WORKERS="${CALIBRATION_WORKERS:-8}"
+# Global rollout 768 over DP8 gives 96 local requests. This is distinct from policy training MBS.
+RL_PROMPT_BATCH_SIZE="${RL_PROMPT_BATCH_SIZE:-96}"
+# Standalone final generation has no optimizer state resident, so reuse the qualified local wave.
+FINAL_PROMPT_BATCH_SIZE="${FINAL_PROMPT_BATCH_SIZE:-96}"
+# MBS8 is the qualified H100 default, not a measured ceiling. Offload-cache MBS32 passed two
+# steady-state GB300 updates, but that does not establish H100 capacity; TP1 MBS64 also exceeds
+# the signed-int32 local GLU span.
+RL_TRAIN_MICRO_BATCH_SIZE="${RL_TRAIN_MICRO_BATCH_SIZE:-8}"
 SAFETY_BATCH_SIZE="${SAFETY_BATCH_SIZE:-128}"
 SAFETY_ORF_WORKERS="${SAFETY_ORF_WORKERS:-32}"
 SAFETY_THREADS="${SAFETY_THREADS:-32}"
 SAFETY_PHROGS_THREADS="${SAFETY_PHROGS_THREADS:-64}"
+PHIX174_HOST_EVIDENCE_JSON='{"source":"NCBI Datasets v2alpha genome dataset report","source_version":"NCBI Datasets v2alpha API","replication_host_domains":["BACTERIA"],"confirmed":true,"metadata":{"accession":"NC_001422.1","intended_design_context":"PhiX/Microviridae bacterial phage"}}'
+if [[ ! "${RL_PROMPT_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'RL_PROMPT_BATCH_SIZE must be a positive integer; got %q\n' "${RL_PROMPT_BATCH_SIZE}" >&2
+  exit 2
+fi
+if [[ ! "${FINAL_PROMPT_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'FINAL_PROMPT_BATCH_SIZE must be a positive integer; got %q\n' "${FINAL_PROMPT_BATCH_SIZE}" >&2
+  exit 2
+fi
+if [[ ! "${RL_TRAIN_MICRO_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'RL_TRAIN_MICRO_BATCH_SIZE must be a positive integer; got %q\n' \
+    "${RL_TRAIN_MICRO_BATCH_SIZE}" >&2
+  exit 2
+fi
+if ((768 % (NUM_GPUS * RL_TRAIN_MICRO_BATCH_SIZE) != 0)); then
+  printf 'RL global batch 768 must be divisible by NUM_GPUS * RL_TRAIN_MICRO_BATCH_SIZE (%s * %s)\n' \
+    "${NUM_GPUS}" "${RL_TRAIN_MICRO_BATCH_SIZE}" >&2
+  exit 2
+fi
+if [[ ! "${SFT_MAX_STEPS}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'SFT_MAX_STEPS must be a positive integer; got %q\n' "${SFT_MAX_STEPS}" >&2
+  exit 2
+fi
+if [[ ! "${WANDB_INIT_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'WANDB_INIT_TIMEOUT must be a positive integer; got %q\n' "${WANDB_INIT_TIMEOUT}" >&2
+  exit 2
+fi
 
 usage() {
   printf '%s\n' \
     'Usage: ./examples/phix174_8xh100.sh [OPTIONS]' \
-    '  --result-root PATH         Result directory (default: results/phix174-8xh100)' \
+    '  --result-root PATH         Result directory (default: results/phix174-8xh100-mixed-anchors)' \
     '  --model-variant NAME       7b-base (default) or 7b-1m' \
     '  --sampling-selection PATH  Copy and use a sampling-selection YAML' \
     '  --hopper-fp8-inference     Opt in to regular all-layer FP8 for calibration/rollout/scoring' \
@@ -80,7 +127,7 @@ usage() {
 while (($#)); do
   case "$1" in
     --result-root) RESULT_ROOT="$2"; shift 2 ;;
-    --model-variant) MODEL_VARIANT="$2"; shift 2 ;;
+    --model-variant) MODEL_VARIANT="$2"; MODEL_VARIANT_EXPLICIT=1; shift 2 ;;
     --sampling-selection) SAMPLING_SELECTION_SOURCE="$2"; shift 2 ;;
     --hopper-fp8-inference) HOPPER_FP8_INFERENCE=1; shift ;;
     --wandb) WANDB_ENABLED=1; shift ;;
@@ -123,6 +170,27 @@ if [[ "${CALIBRATE_ONLY}" == "1" ]] && ((10#${RESUME_FROM} > 30)); then
   printf '%s\n' '--calibrate-only requires --resume-from 00, 10, 20, or 30' >&2
   exit 2
 fi
+
+MODEL_VARIANT_STATE="${RESULT_ROOT}/state/model-variant"
+if [[ -s "${MODEL_VARIANT_STATE}" ]]; then
+  RECORDED_MODEL_VARIANT="$(sed -n '1p' "${MODEL_VARIANT_STATE}")"
+  if [[ "${MODEL_VARIANT_EXPLICIT}" == "1" && "${MODEL_VARIANT}" != "${RECORDED_MODEL_VARIANT}" ]]; then
+    printf 'This result root recorded model variant is %s, not %s; use the recorded variant or a new result root.\n' \
+      "${RECORDED_MODEL_VARIANT}" "${MODEL_VARIANT}" >&2
+    exit 2
+  fi
+  MODEL_VARIANT="${RECORDED_MODEL_VARIANT}"
+elif [[ -s "${RESULT_ROOT}/state/selected-sft" || -f "${RESULT_ROOT}/stages/20-sft.done" ]]; then
+  # Runs created before this selector existed used the publication-style 7B-base checkpoint.
+  RECORDED_MODEL_VARIANT='7b-base'
+  if [[ "${MODEL_VARIANT_EXPLICIT}" == "1" && "${MODEL_VARIANT}" != "${RECORDED_MODEL_VARIANT}" ]]; then
+    printf 'This result root recorded model variant is %s, not %s; use the recorded variant or a new result root.\n' \
+      "${RECORDED_MODEL_VARIANT}" "${MODEL_VARIANT}" >&2
+    exit 2
+  fi
+  MODEL_VARIANT="${RECORDED_MODEL_VARIANT}"
+fi
+
 case "${MODEL_VARIANT}" in
   7b-base)
     BASE_CHECKPOINT_RESOURCE='evo2/7b-8k:1.0'
@@ -157,9 +225,14 @@ fi
 WANDB_RUN_STEM="$(basename -- "${RESULT_ROOT}")-${MODEL_VARIANT}"
 WANDB_SFT_RUN_NAME="${WANDB_RUN_STEM}-sft"
 WANDB_RL_RUN_NAME="${WANDB_RUN_STEM}-gdpo"
+# Successful Arc batches are metadata-heavy and discarded. Keep that transient tree off shared
+# storage; set RL_EXTERNAL_QC_WORK_ROOT explicitly when node-local scratch lives elsewhere.
+RL_EXTERNAL_QC_WORK_ROOT="${RL_EXTERNAL_QC_WORK_ROOT:-${TMPDIR:-/tmp}/evo2-phage-gen/${WANDB_RUN_STEM}/external-qc}"
 declare -a SFT_WANDB_ARGS=()
 declare -a RL_WANDB_ARGS=(logger.wandb_enabled=false)
 if [[ "${WANDB_ENABLED}" == "1" ]]; then
+  # A loaded multi-GPU node can take longer than W&B's 90-second default handshake.
+  export WANDB_INIT_TIMEOUT
   SFT_WANDB_ARGS=(
     --wandb-project "${WANDB_SFT_PROJECT_NAME}"
     --wandb-run-name "${WANDB_SFT_RUN_NAME}"
@@ -173,6 +246,9 @@ if [[ "${WANDB_ENABLED}" == "1" ]]; then
     logger.wandb.project="${WANDB_RL_PROJECT_NAME}"
     logger.wandb.name="${WANDB_RL_RUN_NAME}"
   )
+  if [[ -n "${WANDB_ENTITY_NAME}" ]]; then
+    RL_WANDB_ARGS+=(+logger.wandb.entity="${WANDB_ENTITY_NAME}")
+  fi
 fi
 
 STATE_DIR="${RESULT_ROOT}/state"
@@ -180,19 +256,23 @@ STAGE_DIR="${RESULT_ROOT}/stages"
 RUNLOG="${RESULT_ROOT}/RUNLOG.md"
 SAMPLING_SELECTION="${RESULT_ROOT}/calibration/sampling-selection.yaml"
 DEFAULT_SAMPLING_SELECTION="${RECIPE_ROOT}/examples/default-sampling-selection.yaml"
+PHIX_REFERENCE_FASTA="${RECIPE_ROOT}/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna"
 SAMPLING_SELECTION_OVERRIDDEN=0
 SAMPLING_TEMPERATURE=
 SAMPLING_TOP_K=
 SAMPLING_TOP_P=
 SAMPLING_MAX_NEW_TOKENS=
 SAMPLING_PROMPT_LENGTHS_TEXT=
+SAMPLING_PROMPT_ANCHORS_TEXT=
 SAMPLING_RL_SEED=
 SAMPLING_ROLLOUT_SEED=
 SAMPLING_SEED_STRIDE=
 SAMPLING_PROMPT_LABEL=
 SAMPLING_TRAIN_RECORDS=
-SAMPLING_FINAL_PER_LENGTH=
+SAMPLING_FINAL_PER_STRATUM=
+RL_MAX_MODEL_LEN=
 declare -a SAMPLING_PROMPT_LENGTHS=()
+declare -a SAMPLING_PROMPT_ANCHORS=()
 mkdir -p "${RESULT_ROOT}" "${STATE_DIR}" "${STAGE_DIR}"
 exec 9> "${RESULT_ROOT}/.run.lock"
 if ! flock -n 9; then
@@ -236,6 +316,18 @@ report_run_exit() {
   trap - EXIT
   if [[ "${status}" != 0 && "${RUN_COMPLETION_REPORTED}" != 1 ]]; then
     set +e
+    local failure_entry failure_archive failure_archive_dir
+    failure_entry="$(find "${RL_EXTERNAL_QC_WORK_ROOT}" -mindepth 1 \( -type f -o -type l \) -print -quit 2>/dev/null)"
+    if [[ -n "${failure_entry}" ]]; then
+      failure_archive_dir="${RESULT_ROOT}/failure-artifacts"
+      failure_archive="${failure_archive_dir}/external-qc-stage-${CURRENT_STAGE_ID:-preflight}-$(date -u +%Y%m%dT%H%M%SZ)-$$.tar"
+      mkdir -p "${failure_archive_dir}"
+      if tar -C "${RL_EXTERNAL_QC_WORK_ROOT}" -cf "${failure_archive}" .; then
+        note "retained external-QC failure artifacts: ${failure_archive}" >&2
+      else
+        note "WARNING: could not archive external-QC failure artifacts from ${RL_EXTERNAL_QC_WORK_ROOT}" >&2
+      fi
+    fi
     completed="$(completed_stage_count)"
     if ((CURRENT_STAGE_ORDINAL > 0)); then
       note "RUN FAILED during step ${CURRENT_STAGE_ORDINAL}/${TOTAL_STAGES} (stage ${CURRENT_STAGE_ID}: ${CURRENT_STAGE_DESCRIPTION}); ${completed}/${TOTAL_STAGES} steps complete; exit code ${status}; see ${RUNLOG}" >&2
@@ -248,26 +340,13 @@ report_run_exit() {
 
 trap report_run_exit EXIT
 
-MODEL_VARIANT_STATE="${STATE_DIR}/model-variant"
-if [[ -s "${MODEL_VARIANT_STATE}" ]]; then
-  RECORDED_MODEL_VARIANT="$(sed -n '1p' "${MODEL_VARIANT_STATE}")"
-elif [[ -s "${STATE_DIR}/selected-sft" || -f "${STAGE_DIR}/20-sft.done" ]]; then
-  # Runs created before this selector existed used the publication-style 7B-base checkpoint.
-  RECORDED_MODEL_VARIANT='7b-base'
-else
-  RECORDED_MODEL_VARIANT="${MODEL_VARIANT}"
-fi
-if [[ "${MODEL_VARIANT}" != "${RECORDED_MODEL_VARIANT}" ]]; then
-  printf 'This result root recorded model variant is %s, not %s; use the recorded variant or a new result root.\n' \
-    "${RECORDED_MODEL_VARIANT}" "${MODEL_VARIANT}" >&2
-  exit 2
-fi
 printf '%s\n' "${MODEL_VARIANT}" > "${MODEL_VARIANT_STATE}"
 note "model variant: ${MODEL_VARIANT} (${BASE_CHECKPOINT_RESOURCE}, model size ${MODEL_SIZE})"
 
 sampling_selection_fields() {
   python - "$1" <<'PY'
 import math
+import re
 import sys
 from pathlib import Path
 
@@ -280,6 +359,7 @@ required = {
     "top_p",
     "max_new_tokens",
     "prompt_lengths",
+    "prompt_anchors",
     "rl_seed",
     "rollout_seed",
     "seed_stride",
@@ -325,11 +405,28 @@ try:
         raise ValueError("prompt_lengths must contain integers")
     if len(set(prompt_lengths)) != len(prompt_lengths):
         raise ValueError("prompt_lengths must be unique")
-    if any(value < 0 or value > 65 for value in prompt_lengths):
-        raise ValueError("prompt_lengths must be between 0 and the 65-nt PhiX174 reference prefix")
-    strata = len(prompt_lengths)
-    if max_new_tokens + max(prompt_lengths) > 10240:
-        raise ValueError("max_new_tokens plus the longest prompt exceeds the 10,240-token model context")
+    if any(value < 0 or value > 5386 for value in prompt_lengths):
+        raise ValueError("prompt_lengths must be between 0 and the 5,386-nt PhiX174 reference length")
+    prompt_anchors = data["prompt_anchors"]
+    if not isinstance(prompt_anchors, list) or not prompt_anchors:
+        raise ValueError("prompt_anchors must be a non-empty list")
+    anchors = []
+    for anchor in prompt_anchors:
+        if not isinstance(anchor, dict) or set(anchor) != {"name", "start_1_based"}:
+            raise ValueError("each prompt anchor must contain only name and start_1_based")
+        name, start = anchor["name"], anchor["start_1_based"]
+        if not isinstance(name, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name) is None:
+            raise ValueError("prompt anchor names must be safe non-empty identifiers")
+        if isinstance(start, bool) or not isinstance(start, int) or not 1 <= start <= 5386:
+            raise ValueError("prompt anchor starts must be 1-based coordinates within PhiX174")
+        anchors.append((name, start))
+    if len({name for name, _ in anchors}) != len(anchors):
+        raise ValueError("prompt anchor names must be unique")
+    strata = len(prompt_lengths) * len(anchors)
+    if max_new_tokens + max(prompt_lengths) + 2 > 10240:
+        raise ValueError(
+            "max_new_tokens plus the longest prompt and +~ direction prefix exceeds the 10,240-token model context"
+        )
 except (OSError, ValueError, yaml.YAMLError) as error:
     print(f"Invalid sampling selection {path}: {error}", file=sys.stderr)
     raise SystemExit(2) from error
@@ -340,12 +437,13 @@ fields = (
     str(top_p),
     str(max_new_tokens),
     " ".join(str(value) for value in prompt_lengths),
+    " ".join(f"{name}:{start}" for name, start in anchors),
     str(rl_seed),
     str(rollout_seed),
     str(seed_stride),
-    "-".join(str(value) for value in prompt_lengths),
-    # Cover every selected stratum and retain complete two-prompt GDPO steps.
-    str(max(12, 2 * ((strata + 1) // 2))),
+    "-".join([*(str(value) for value in prompt_lengths), *(name for name, _ in anchors)]),
+    # The loader consumes 16 prompt records per step; retain a balanced multi-epoch bank.
+    str(96),
     str((1000 + strata - 1) // strata),
 )
 print("\t".join(fields))
@@ -353,7 +451,7 @@ PY
 }
 
 load_sampling_selection() {
-  local fields
+  local fields longest_prompt_length=0 minimum_model_length prompt_length
   if [[ -s "${SAMPLING_SELECTION}" ]]; then
     fields="$(sampling_selection_fields "${SAMPLING_SELECTION}")" || return
   elif [[ "${DRY_RUN}" == "1" ]]; then
@@ -363,10 +461,17 @@ load_sampling_selection() {
     return 2
   fi
   IFS=$'\t' read -r SAMPLING_TEMPERATURE SAMPLING_TOP_K SAMPLING_TOP_P \
-    SAMPLING_MAX_NEW_TOKENS SAMPLING_PROMPT_LENGTHS_TEXT SAMPLING_RL_SEED \
+    SAMPLING_MAX_NEW_TOKENS SAMPLING_PROMPT_LENGTHS_TEXT SAMPLING_PROMPT_ANCHORS_TEXT SAMPLING_RL_SEED \
     SAMPLING_ROLLOUT_SEED SAMPLING_SEED_STRIDE SAMPLING_PROMPT_LABEL \
-    SAMPLING_TRAIN_RECORDS SAMPLING_FINAL_PER_LENGTH <<< "${fields}"
+    SAMPLING_TRAIN_RECORDS SAMPLING_FINAL_PER_STRATUM <<< "${fields}"
   read -r -a SAMPLING_PROMPT_LENGTHS <<< "${SAMPLING_PROMPT_LENGTHS_TEXT}"
+  read -r -a SAMPLING_PROMPT_ANCHORS <<< "${SAMPLING_PROMPT_ANCHORS_TEXT}"
+  for prompt_length in "${SAMPLING_PROMPT_LENGTHS[@]}"; do
+    ((prompt_length > longest_prompt_length)) && longest_prompt_length="${prompt_length}"
+  done
+  # Include the two-token +~ direction prefix, then round to the cache block boundary.
+  minimum_model_length="$((SAMPLING_MAX_NEW_TOKENS + longest_prompt_length + 2))"
+  RL_MAX_MODEL_LEN="$((((minimum_model_length + 255) / 256) * 256))"
 }
 
 if [[ "${DRY_RUN}" != "1" ]]; then
@@ -384,7 +489,7 @@ if [[ -n "${SAMPLING_SELECTION_SOURCE}" ]]; then
   fi
   SAMPLING_SELECTION_OVERRIDDEN=1
   if [[ "${SAMPLING_SELECTION_SOURCE}" -ef "${DEFAULT_SAMPLING_SELECTION}" ]]; then
-    note "WARNING: using bundled historical sampling settings from ${SAMPLING_SELECTION_SOURCE}; they override rather than derive from fresh calibration"
+    note "WARNING: using bundled sampling defaults from ${SAMPLING_SELECTION_SOURCE}; they override rather than derive from fresh calibration"
   else
     note "WARNING: copied explicit sampling selection from ${SAMPLING_SELECTION_SOURCE} to ${SAMPLING_SELECTION}; fresh calibration compatibility will not be enforced"
   fi
@@ -431,7 +536,16 @@ monitored() {
 }
 
 state() { printf '%s\n' "$2" > "${STATE_DIR}/$1"; }
-read_state() { [[ "${DRY_RUN}" == "1" ]] && printf '<%s>\n' "$1" || sed -n '1p' "${STATE_DIR}/$1"; }
+read_state() {
+  if [[ -s "${STATE_DIR}/$1" ]]; then
+    sed -n '1p' "${STATE_DIR}/$1"
+  elif [[ "${DRY_RUN}" == "1" ]]; then
+    printf '<%s>\n' "$1"
+  else
+    printf 'Missing required state: %s\n' "${STATE_DIR}/$1" >&2
+    return 2
+  fi
+}
 
 check_scan() {
   local mode="${2:-strict}" tolerated
@@ -496,6 +610,28 @@ if result["decision"] == "pause_for_diagnosis":
 PY
 }
 
+validate_mbridge_checkpoint() {
+  python - "$1" <<'PY'
+import sys
+from pathlib import Path
+
+from bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl import validate_mbridge_checkpoint
+
+print(validate_mbridge_checkpoint(Path(sys.argv[1])))
+PY
+}
+
+validate_prepared_sft_checkpoint() {
+  python - "$1" <<'PY'
+import sys
+from pathlib import Path
+
+from bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl import validate_prepared_sft_checkpoint
+
+print(validate_prepared_sft_checkpoint(Path(sys.argv[1])))
+PY
+}
+
 select_checkpoint() {
   local mode="$1" tensorboard_root="$2" checkpoint_root="$3" output="$4"
   python - "${mode}" "${tensorboard_root}" "${checkpoint_root}" "${output}" <<'PY'
@@ -539,6 +675,9 @@ gpu_type='not queried (dry run)'
 if [[ "${DRY_RUN}" != "1" ]]; then
   export PATH="${RECIPE_ROOT}/data/external/bin:${PATH}"
   export CUDA_DEVICE_MAX_CONNECTIONS=1
+  # Expandable segments mitigate fragmentation, not steady-state capacity. The stage-40 pilot
+  # crosses two updates because Adam materializes after the first; the candidate policy
+  # microbatch also relies on releasing the non-persistent native cache before training.
   export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   export NCCL_GRAPH_REGISTER=0
   if ! gpu_info="$(nvidia-smi --query-gpu=name --format=csv,noheader)"; then
@@ -566,9 +705,12 @@ if [[ "${DRY_RUN}" != "1" ]]; then
 fi
 note "planned topology: ${NUM_GPUS} GPUs, SFT tensor parallel ${SFT_TENSOR_PARALLEL_SIZE}, ${NUM_CPUS} logical CPUs; inference precision ${INFERENCE_PRECISION_NAME}"
 python - "${RESULT_ROOT}/settings.json" "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}" \
-  "${SFT_TENSOR_PARALLEL_SIZE}" "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
+  "${SFT_TENSOR_PARALLEL_SIZE}" "${SFT_MAX_STEPS}" "${RL_TRAIN_MICRO_BATCH_SIZE}" \
+  "${FINAL_PROMPT_BATCH_SIZE}" \
+  "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
   "${WANDB_ENABLED}" "${WANDB_ENTITY_NAME}" "${WANDB_SFT_PROJECT_NAME}" "${WANDB_RL_PROJECT_NAME}" \
-  "${WANDB_SFT_RUN_NAME}" "${WANDB_RL_RUN_NAME}" "${INFERENCE_PRECISION_NAME}" <<'PY'
+  "${WANDB_SFT_RUN_NAME}" "${WANDB_RL_RUN_NAME}" "${WANDB_INIT_TIMEOUT}" \
+  "${INFERENCE_PRECISION_NAME}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -579,6 +721,9 @@ from pathlib import Path
     cpu_count,
     gpu_type,
     sft_tensor_parallel_size,
+    sft_max_steps,
+    rl_train_micro_batch_size,
+    final_prompt_batch_size,
     model_variant,
     base_checkpoint,
     model_size,
@@ -588,6 +733,7 @@ from pathlib import Path
     wandb_rl_project,
     wandb_sft_run_name,
     wandb_rl_run_name,
+    wandb_init_timeout,
     inference_precision,
 ) = sys.argv[1:]
 wandb_is_enabled = wandb_enabled == "1"
@@ -596,6 +742,9 @@ settings = {
     "cpu_count": int(cpu_count),
     "gpu_type": gpu_type,
     "sft_tensor_parallel_size": int(sft_tensor_parallel_size),
+    "sft_max_steps": int(sft_max_steps),
+    "rl_train_micro_batch_size": int(rl_train_micro_batch_size),
+    "final_prompt_batch_size": int(final_prompt_batch_size),
     "model_variant": model_variant,
     "base_checkpoint": base_checkpoint,
     "model_size": model_size,
@@ -609,6 +758,7 @@ settings = {
     "wandb_rl_project": wandb_rl_project,
     "wandb_sft_run_name": wandb_sft_run_name,
     "wandb_rl_run_name": wandb_rl_run_name,
+    "wandb_init_timeout": int(wandb_init_timeout),
 }
 Path(output).write_text(json.dumps(settings, indent=2) + "\n")
 PY
@@ -622,7 +772,10 @@ stage_00() {
     --pharokka-database-url "${PHAROKKA_DATABASE_URL}" \
     --pharokka-database-md5 "${PHAROKKA_DATABASE_MD5}" \
     --pharokka-database-release "${PHAROKKA_DATABASE_RELEASE}"
-  run evo2_phage_prepare_arc_pipeline --output-dir data/arc_pipeline_patched --overwrite
+  # Root-owned containers otherwise reject the host-owned Arc bind mount; trust only this checkout for this command.
+  run env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory \
+    GIT_CONFIG_VALUE_0="${RECIPE_ROOT}/data/external/arc_evo2" \
+    evo2_phage_prepare_arc_pipeline --output-dir data/arc_pipeline_patched --overwrite
   if [[ "${DRY_RUN}" == "1" || ! -s data/external/mmseqs/NC_001422_1_Gprotein/mmseqs_db_NC_001422_1_Gprotein.dbtype ]]; then
     run mkdir -p data/external/mmseqs/NC_001422_1_Gprotein
     run mmseqs createdb data/external/arc_evo2/phage_gen/data/NC_001422.1_Gprotein.fasta data/external/mmseqs/NC_001422_1_Gprotein/mmseqs_db_NC_001422_1_Gprotein
@@ -692,18 +845,38 @@ PY
 }
 
 stage_20() {
-  local prep base_nemo base_mbridge="${RESULT_ROOT}/checkpoints/${BASE_CHECKPOINT_DIR}" sft="${RESULT_ROOT}/sft/train" selected
+  local prep base_nemo base_iteration base_mbridge="${RESULT_ROOT}/checkpoints/${BASE_CHECKPOINT_DIR}" sft="${RESULT_ROOT}/sft/train" selected
   prep="$(read_state sft-prepared)"
-  local model=(--hf-tokenizer-model-path tokenizers/nucleotide_fast_tokenizer_512 --model-size "${MODEL_SIZE}" --micro-batch-size 1 --seq-length 10240 --tensor-model-parallel-size "${SFT_TENSOR_PARALLEL_SIZE}" --use-precision-aware-optimizer --bf16-main-grads --grad-reduce-in-fp32 --overlap-grad-reduce --cross-entropy-loss-fusion --no-weight-decay-embeddings --no-renormalize-loss --use-subquadratic-ops --no-fp32-residual-connection --activation-checkpoint-recompute-num-layers 1 --eod-pad-in-loss-mask --mixed-precision-recipe bf16_mixed)
+  local model=(--hf-tokenizer-model-path tokenizers/nucleotide_fast_tokenizer_512 --model-size "${MODEL_SIZE}" --micro-batch-size 1 --seq-length 10240 --tensor-model-parallel-size "${SFT_TENSOR_PARALLEL_SIZE}" --use-precision-aware-optimizer --bf16-main-grads --grad-reduce-in-fp32 --overlap-grad-reduce --cross-entropy-loss-fusion --no-weight-decay-embeddings --no-renormalize-loss --use-subquadratic-ops --no-fp32-residual-connection --activation-checkpoint-recompute-num-layers 1 --mixed-precision-recipe bf16_mixed)
   if [[ -f "${STAGE_DIR}/20-sft.done" ]]; then
     note 'substage 20-sft already complete'
   else
-    [[ "${DRY_RUN}" == "1" ]] && base_nemo="${BASE_DOWNLOAD_PLACEHOLDER}" || base_nemo="$(download_bionemo_data "${BASE_CHECKPOINT_RESOURCE}" | tail -n 1)"
-    if [[ "${DRY_RUN}" == "1" || ! -d "${base_mbridge}" ]]; then
+    if [[ -e "${base_mbridge}" ]]; then
+      if ! base_iteration="$(validate_mbridge_checkpoint "${base_mbridge}" 2>/dev/null)"; then
+        printf 'Existing converted base checkpoint is incomplete: %s; inspect it and remove it explicitly.\n' \
+          "${base_mbridge}" >&2
+        return 2
+      fi
+      note "reusing validated converted base checkpoint: ${base_iteration}"
+    else
+      if [[ "${DRY_RUN}" == "1" ]]; then
+        base_nemo="${BASE_DOWNLOAD_PLACEHOLDER}"
+      else
+        base_nemo="$(download_bionemo_data "${BASE_CHECKPOINT_RESOURCE}" | tail -n 1)"
+      fi
       run evo2_convert_nemo2_to_mbridge --nemo2-ckpt-dir "${base_nemo}" --tokenizer-path tokenizers/nucleotide_fast_tokenizer_512 --mbridge-ckpt-dir "${base_mbridge}" --model-size "${MODEL_SIZE}" --seq-length 10240 --mixed-precision-recipe bf16_mixed
+      if [[ "${DRY_RUN}" != "1" ]]; then
+        base_iteration="$(validate_mbridge_checkpoint "${base_mbridge}")"
+        note "validated converted base checkpoint: ${base_iteration}"
+      fi
     fi
-    monitored 'SFT smoke' "${RESULT_ROOT}/sft/smoke.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 2 --eval-interval 1 --eval-iters 1 --warmup-steps 0 --decay-steps 2 --result-dir "${RESULT_ROOT}/sft/smoke" --experiment-name evo2-smoke
-    monitored '12,000-step SFT' "${sft}/train.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 12000 --eval-interval 400 --eval-iters 4 --lr 1e-5 --min-lr 1e-6 --warmup-steps 600 --decay-steps 11400 --enable-preemption --keep-best-k 3 --most-recent-k 1 --checkpoint-metric-name 'lm loss' --strict-checkpoint-metric --checkpoint-metric-step-tolerance 1 --result-dir "${sft}" --experiment-name evo2 "${SFT_WANDB_ARGS[@]}"
+    if [[ -f "${STAGE_DIR}/20-sft-smoke.done" ]]; then
+      note 'substage 20-sft-smoke already complete'
+    else
+      monitored 'SFT smoke' "${RESULT_ROOT}/sft/smoke.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps 2 --eval-interval 1 --eval-iters 1 --warmup-steps 0 --decay-steps 2 --result-dir "${RESULT_ROOT}/sft/smoke" --experiment-name evo2-smoke
+      [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/20-sft-smoke.done"
+    fi
+    monitored 'SFT training' "${sft}/train.log" torchrun --nproc-per-node "${NUM_GPUS}" --no-python train_evo2 "${model[@]}" --dataset-config "${prep}/training_dataset.yaml" --finetune-ckpt-dir "${base_mbridge}" --global-batch-size 32 --max-steps "${SFT_MAX_STEPS}" --eval-interval 400 --eval-iters 4 --lr 1e-5 --min-lr 1e-6 --warmup-steps 600 --decay-steps 11400 --enable-preemption --keep-best-k 3 --most-recent-k 1 --checkpoint-metric-name 'lm loss' --strict-checkpoint-metric --checkpoint-metric-step-tolerance 1 --result-dir "${sft}" --experiment-name evo2 "${SFT_WANDB_ARGS[@]}"
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/20-sft.done"
   fi
   [[ "${DRY_RUN}" == "1" ]] && selected='<selected-sft>' || selected="$(select_checkpoint sft "${sft}/evo2/tb_logs" "${sft}/evo2/checkpoints" "${RESULT_ROOT}/sft/checkpoint-selection.json")"
@@ -714,18 +887,22 @@ stage_20() {
 
 stage_30() {
   local selected calibration="${RESULT_ROOT}/calibration" evidence
+  local -a prompt_anchor_args=()
   selected="$(read_state selected-sft)"; evidence="${calibration}/scoring/selection-evidence.csv"
   if [[ -f "${STAGE_DIR}/30-calibration-generation.done" ]]; then
     note 'substage 30-calibration-generation already complete'
   else
-    monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='0 1 2 4 6 8 10 12 16 24 32' TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=6000 GPU_IDS="${GPU_IDS}" TENSOR_PARALLEL_SIZE=1 HOPPER_FP8_INFERENCE="${HOPPER_FP8_INFERENCE}" scripts/calibration/run_sft_sampling_sweep.sh
+    monitored 'calibration generation' "${calibration}/generation.log" env SOURCE_ENV=0 RUN_ROOT="${calibration}/generation" CKPT_DIR="${selected}" PROMPT_LENGTHS='16 24' PROMPT_ANCHORS='origin:1 before_g:2387 after_h:3918 a_cluster_start:3973' REFERENCE_FASTA="${PHIX_REFERENCE_FASTA}" TEMPERATURES='0.3 0.5 0.7 0.9 1.0 1.1 1.3' NUM_PROMPTS=64 TARGET_LENGTH=5444 GPU_IDS="${GPU_IDS}" TENSOR_PARALLEL_SIZE=1 HOPPER_FP8_INFERENCE="${HOPPER_FP8_INFERENCE}" scripts/calibration/run_sft_sampling_sweep.sh
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/30-calibration-generation.done"
   fi
   if [[ -f "${STAGE_DIR}/30-calibration-scoring.done" ]]; then
     note 'substage 30-calibration-scoring already complete'
   else
-    run evo2_phage_prepare_arc_pipeline --output-dir data/arc_pipeline_patched --overwrite
-    monitored 'calibration scoring' "${calibration}/scoring.log" env SOURCE_ENV=0 CALIBRATION_ROOT="${calibration}" GENERATION_ROOT="${calibration}/generation" ARC_CONFIG="${RECIPE_ROOT}/configs/arc_genome_design_filtering_local.yaml" PIPELINE_SCRIPT="${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" TOOL_BIN_DIR="${RECIPE_ROOT}/data/external/bin" REFERENCE_FASTA="${RECIPE_ROOT}/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna" SFT_FASTA="${RESULT_ROOT}/sft/source-safety/partitions/pass.fasta" WORKERS="${CALIBRATION_WORKERS}" scripts/calibration/run_sampling_calibration_scoring.sh
+    # Scope Arc checkout trust to this preparer process; do not mutate container-global Git configuration.
+    run env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory \
+      GIT_CONFIG_VALUE_0="${RECIPE_ROOT}/data/external/arc_evo2" \
+      evo2_phage_prepare_arc_pipeline --output-dir data/arc_pipeline_patched --overwrite
+    monitored 'calibration scoring' "${calibration}/scoring.log" env SOURCE_ENV=0 CALIBRATION_ROOT="${calibration}" GENERATION_ROOT="${calibration}/generation" ARC_CONFIG="${RECIPE_ROOT}/configs/arc_genome_design_filtering_local.yaml" PIPELINE_SCRIPT="${RECIPE_ROOT}/data/arc_pipeline_patched/genome_design_filtering_pipeline.py" TOOL_BIN_DIR="${RECIPE_ROOT}/data/external/bin" REFERENCE_FASTA="${RECIPE_ROOT}/data/external/arc_evo2/phage_gen/data/NC_001422_1.fna" SFT_FASTA="${RESULT_ROOT}/sft/source-safety/partitions/pass.fasta" SAFETY_ASSET_MANIFEST="${RECIPE_ROOT}/data/external/safety/asset_manifest.yaml" SAFETY_POLICY="${RECIPE_ROOT}/configs/phage_safety_policy.yaml" SAFETY_HOST_DOMAIN=BACTERIA SAFETY_HOST_EVIDENCE_JSON="${PHIX174_HOST_EVIDENCE_JSON}" WORKERS="${CALIBRATION_WORKERS}" scripts/calibration/run_sampling_calibration_scoring.sh
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/30-calibration-scoring.done"
   fi
   if [[ "${CALIBRATE_ONLY}" == "1" ]]; then
@@ -749,12 +926,14 @@ import yaml
 
 table = pd.read_csv(sys.argv[1])
 selection = yaml.safe_load(open(sys.argv[2]))
+anchor_names = [anchor["name"] for anchor in selection["prompt_anchors"]]
 chosen = table[
     (table.temperature == selection["temperature"])
     & table.prefix_length.isin(selection["prompt_lengths"])
+    & table.prompt_anchor.isin(anchor_names)
 ]
 supported = (
-    len(chosen) == len(selection["prompt_lengths"])
+    len(chosen) == len(selection["prompt_lengths"]) * len(anchor_names)
     and chosen[["eligible", "metric_environment_ok", "temperature_1_default_candidate"]].to_numpy().all()
 )
 if not supported:
@@ -769,53 +948,81 @@ PY
     note "fresh calibration supports the bundled default; wrote ${SAMPLING_SELECTION}"
   fi
   load_sampling_selection
-  note "sampling selection: temperature=${SAMPLING_TEMPERATURE}, prompt lengths=${SAMPLING_PROMPT_LENGTHS_TEXT}, max new tokens=${SAMPLING_MAX_NEW_TOKENS}"
+  for anchor in "${SAMPLING_PROMPT_ANCHORS[@]}"; do
+    prompt_anchor_args+=(--prompt-anchor "${anchor}")
+  done
+  note "sampling selection: temperature=${SAMPLING_TEMPERATURE}, prompt lengths=${SAMPLING_PROMPT_LENGTHS_TEXT}, anchors=${SAMPLING_PROMPT_ANCHORS_TEXT}, max new tokens=${SAMPLING_MAX_NEW_TOKENS}"
   run evo2_phage_generation write-rl-prompts --output "${RESULT_ROOT}/rl/train.jsonl" \
     --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --num-records "${SAMPLING_TRAIN_RECORDS}" \
-    --id-prefix train
+    --reference-fasta "${PHIX_REFERENCE_FASTA}" "${prompt_anchor_args[@]}" --id-prefix train
   run evo2_phage_generation write-rl-prompts --output "${RESULT_ROOT}/rl/validation.jsonl" \
     --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --num-records 96 \
-    --id-prefix validation
+    --reference-fasta "${PHIX_REFERENCE_FASTA}" "${prompt_anchor_args[@]}" --id-prefix validation
 }
 
 stage_40() {
   local selected rl="${RESULT_ROOT}/rl" control="${RESULT_ROOT}/rl/environment-control" chosen
   local prepared_sft_root="${RESULT_ROOT}/rl/sft-checkpoint" rl_checkpoint
+  local -a control_anchor_args=(--prompt-anchor coordinate_origin:1)
   load_sampling_selection
+  for anchor in "${SAMPLING_PROMPT_ANCHORS[@]}"; do
+    # Keep one control per circular coordinate; the explicit baseline already covers coordinate 1.
+    [[ "${anchor##*:}" == "1" ]] && continue
+    control_anchor_args+=(--prompt-anchor "${anchor}")
+  done
   if [[ -f "${STAGE_DIR}/40-rl.done" ]]; then
     note 'substage 40-rl already complete'
   else
-    selected="$(read_state selected-sft)"
-    # Use the editable source module so a post-calibration rerun works before console-script metadata is refreshed.
-    run python -m bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl \
-      --source-checkpoint "${selected}" --output-dir "${prepared_sft_root}"
-    if [[ "${DRY_RUN}" == "1" ]]; then
-      rl_checkpoint='<rl-sft-checkpoint>'
+    if [[ -e "${prepared_sft_root}" ]]; then
+      if ! rl_checkpoint="$(validate_prepared_sft_checkpoint "${prepared_sft_root}")"; then
+        printf 'Existing prepared SFT checkpoint is incomplete: %s; inspect it and remove it explicitly.\n' \
+          "${prepared_sft_root}" >&2
+        return 2
+      fi
+      note "reusing validated prepared SFT checkpoint: ${rl_checkpoint}"
     else
-      rl_checkpoint="$(python - "${prepared_sft_root}/preparation-manifest.json" <<'PY'
-import json, sys
-manifest = json.load(open(sys.argv[1]))
-if manifest.get("state") != "succeeded":
-    raise SystemExit(f"SFT checkpoint preparation for RL is not complete: {sys.argv[1]}")
-print(manifest["prepared_sft_checkpoint"])
-PY
-)"
+      selected="$(read_state selected-sft)"
+      # Use the editable source module so a post-calibration rerun works before console-script metadata is refreshed.
+      run python -m bionemo.evo2_phage_gen.prepare_sft_checkpoint_for_rl \
+        --source-checkpoint "${selected}" --output-dir "${prepared_sft_root}"
+      if [[ "${DRY_RUN}" == "1" ]]; then
+        rl_checkpoint='<rl-sft-checkpoint>'
+      else
+        rl_checkpoint="$(validate_prepared_sft_checkpoint "${prepared_sft_root}")"
+      fi
     fi
     state rl-sft-checkpoint "${rl_checkpoint}"
     note "RL will use the prepared optimizer-free, runtime-sanitized SFT checkpoint: ${rl_checkpoint}"
     export NEMO_RL_RAY_NUM_CPUS="${NUM_CPUS}"
-    note "RL Ray CPU slots: ${NEMO_RL_RAY_NUM_CPUS}; reward phases use at most 64 threads"
+    note "RL Ray CPU slots: ${NEMO_RL_RAY_NUM_CPUS}; sequential reward phases use at most 128 threads"
+    note "RL external-QC scratch: ${RL_EXTERNAL_QC_WORK_ROOT}"
     run pytest -q tests/bionemo/evo2_phage_gen/test_reward.py tests/bionemo/evo2_phage_gen/test_nemo_rl_env.py tests/bionemo/evo2_phage_gen/test_reference_controls.py
+    run evo2_phage_generation write-reference-rotations --reference-fasta "${PHIX_REFERENCE_FASTA}" \
+      --output-fasta "${control}/reference-rotations.fasta" "${control_anchor_args[@]}"
     monitored 'RL environment control' "${control}/runner.log" \
       evo2_phage_check_rl --config configs/gdpo_phage_megatron.yaml --checkpoint "${rl_checkpoint}" \
       --prompt-data "${rl}/train.jsonl" --gpus-per-node "${NUM_GPUS}" \
-      --control-fasta data/external/arc_evo2/phage_gen/data/NC_001422_1.fna --control-dir "${control}"
-    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}")
+      --control-fasta "${control}/reference-rotations.fasta" --control-dir "${control}"
+    local common=(checkpointing.pretrained_checkpoint.path="${rl_checkpoint}" checkpointing.save_optimizer=true policy.model_name="${RL_MODEL_NAME}" data.train.data_path="${rl}/train.jsonl" data.validation.data_path="${rl}/validation.jsonl" cluster.gpus_per_node="${NUM_GPUS}" policy.train_micro_batch_size="${RL_TRAIN_MICRO_BATCH_SIZE}" policy.generation.max_new_tokens="${SAMPLING_MAX_NEW_TOKENS}" policy.generation.temperature="${SAMPLING_TEMPERATURE}" policy.generation.top_k="${SAMPLING_TOP_K}" policy.generation.top_p="${SAMPLING_TOP_P}" policy.generation.mcore_generation_config.max_model_len="${RL_MAX_MODEL_LEN}" policy.generation.mcore_generation_config.max_requests="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.prompt_batch_size="${RL_PROMPT_BATCH_SIZE}" policy.generation.mcore_generation_config.kv_cache_management_mode=offload policy.generation.mcore_generation_config.generation_adapter_config.seed="${SAMPLING_RL_SEED}" policy.generation.mcore_generation_config.generation_adapter_config.seed_stride="${SAMPLING_SEED_STRIDE}" env.phage_qc.external_qc.lovis4u_parallel_jobs=64 env.phage_qc.external_qc.lovis4u_mmseqs_threads=2 env.phage_qc.mmseqs_cluster_diversity.parallel_jobs=16 env.phage_qc.mmseqs_cluster_diversity.threads=8)
+    note "RL policy train microbatch: ${RL_TRAIN_MICRO_BATCH_SIZE}; native packed mixed-length decode group size: ${RL_PROMPT_BATCH_SIZE}; generation context ceiling: ${RL_MAX_MODEL_LEN}"
     if [[ -f "${STAGE_DIR}/40-pilot.done" ]]; then
       note 'substage 40-pilot already complete'
     else
-      monitored 'one-step GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" logger.wandb_enabled=false checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=1 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RESULT_ROOT}/rl-pilot/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
+      monitored 'three-step post-validation GDPO pilot' "${RESULT_ROOT}/rl-pilot/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" logger.wandb_enabled=false checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=3 grpo.val_at_start=false grpo.val_period=2 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RL_EXTERNAL_QC_WORK_ROOT}/pilot" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot/logs"
       [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-pilot.done"
+    fi
+    if [[ -f "${STAGE_DIR}/40-pilot-reload.done" ]]; then
+      note 'substage 40-pilot-reload already complete'
+    else
+      # A successful update is not enough: exercise the exact full-state checkpoint in a fresh
+      # process. max_num_steps equals the saved step, so a valid restore exits without training.
+      monitored 'full-state GDPO checkpoint reload' "${RESULT_ROOT}/rl-pilot-reload/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" logger.wandb_enabled=false checkpointing.checkpoint_dir="${RESULT_ROOT}/rl-pilot/checkpoints" checkpointing.save_period=1 grpo.max_num_steps=3 grpo.val_at_start=false grpo.val_period=2 grpo.val_at_end=true env.phage_qc.external_qc.work_dir="${RL_EXTERNAL_QC_WORK_ROOT}/pilot-reload" env.phage_qc.mmseqs_cluster_diversity.work_dir="${RESULT_ROOT}/rl-pilot-reload/mmseqs" env.phage_qc.sequence_safety.work_dir="${RESULT_ROOT}/rl-pilot-reload/safety" logger.log_dir="${RESULT_ROOT}/rl-pilot-reload/logs"
+      run python -m bionemo.evo2_phage_gen.rl_pilot_qualification \
+        --checkpoint-root "${RESULT_ROOT}/rl-pilot/checkpoints" --expected-step 3 \
+        --runner-log "${RESULT_ROOT}/rl-pilot/runner.log" \
+        --reload-log "${RESULT_ROOT}/rl-pilot-reload/runner.log" \
+        --output "${RESULT_ROOT}/rl-pilot/qualification.json"
+      [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-pilot-reload.done"
     fi
     if [[ -f "${STAGE_DIR}/40-pilot-check.done" ]]; then
       note 'substage 40-pilot-check already complete'
@@ -824,7 +1031,7 @@ PY
       check_objectives "${RESULT_ROOT}/rl-pilot/objective-health.json"
       [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-pilot-check.done"
     fi
-    monitored "500-step DP${NUM_GPUS} GDPO" "${rl}/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" "${RL_WANDB_ARGS[@]}" checkpointing.checkpoint_dir="${rl}/checkpoints" env.phage_qc.external_qc.work_dir="${rl}/external-qc" env.phage_qc.mmseqs_cluster_diversity.work_dir="${rl}/mmseqs" env.phage_qc.sequence_safety.work_dir="${rl}/safety" logger.log_dir="${rl}/logs"
+    monitored "500-step DP${NUM_GPUS} GDPO" "${rl}/runner.log" evo2_phage_run_gdpo --config configs/gdpo_phage_megatron.yaml "${common[@]}" "${RL_WANDB_ARGS[@]}" checkpointing.checkpoint_dir="${rl}/checkpoints" env.phage_qc.external_qc.work_dir="${RL_EXTERNAL_QC_WORK_ROOT}/full" env.phage_qc.mmseqs_cluster_diversity.work_dir="${rl}/mmseqs" env.phage_qc.sequence_safety.work_dir="${rl}/safety" logger.log_dir="${rl}/logs"
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/40-rl.done"
   fi
   run evo2_phage_monitor_objectives --tensorboard-root "${rl}/logs" --config configs/gdpo_phage_megatron.yaml --output "${rl}/objective-health.json" --history-output "${rl}/objective-history.json"
@@ -835,11 +1042,27 @@ PY
 
 stage_50() {
   local selected selected_sft rollout="${RESULT_ROOT}/rollout" fasta safety likelihood evidence infer
-  local dedup target diagnostic hard_qc clustering
+  local dedup target diagnostic hard_qc clustering prepared_sft_root="${RESULT_ROOT}/rl/sft-checkpoint"
   local checkv_db repo_root
+  local final_per_length
+  local -a prompt_anchor_args=()
   load_sampling_selection
+  for anchor in "${SAMPLING_PROMPT_ANCHORS[@]}"; do
+    prompt_anchor_args+=(--prompt-anchor "${anchor}")
+  done
+  final_per_length="$((SAMPLING_FINAL_PER_STRATUM * ${#SAMPLING_PROMPT_ANCHORS[@]}))"
   selected="$(read_state selected-rl)"
-  selected_sft="$(read_state selected-sft)"
+  if [[ -e "${prepared_sft_root}" ]]; then
+    selected_sft="$(validate_prepared_sft_checkpoint "${prepared_sft_root}")"
+    state rl-sft-checkpoint "${selected_sft}"
+    note "validated prepared SFT checkpoint for likelihood: ${selected_sft}"
+  else
+    selected_sft="$(read_state rl-sft-checkpoint)"
+    if [[ "${selected_sft}" != '<rl-sft-checkpoint>' ]]; then
+      printf 'Prepared SFT checkpoint for likelihood is unavailable: %s\n' "${prepared_sft_root}" >&2
+      return 2
+    fi
+  fi
   fasta="${rollout}/fasta/phix174_prompt${SAMPLING_PROMPT_LABEL}_temp${SAMPLING_TEMPERATURE}.n1000.fasta"
   safety="${rollout}/sequence-safety"
   likelihood="${rollout}/sft-likelihood"
@@ -857,13 +1080,13 @@ stage_50() {
     fi
   else
     run evo2_phage_generation write-prompts --output-dir "${rollout}/prompts" \
-      --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --num-prompts "${SAMPLING_FINAL_PER_LENGTH}" \
-      --id-prefix final
+      --prompt-lengths "${SAMPLING_PROMPT_LENGTHS[@]}" --num-prompts "${SAMPLING_FINAL_PER_STRATUM}" \
+      --reference-fasta "${PHIX_REFERENCE_FASTA}" "${prompt_anchor_args[@]}" --id-prefix final
   local shard_dir="${rollout}/prompts/dp${NUM_GPUS}" rank started waited alive failed=0 printable prompt_length
   local worker_count wave_start wave_end wave_size gpu_index
   local -a command=() outputs=() pids=() logs=() prompt_files=()
   for prompt_length in "${SAMPLING_PROMPT_LENGTHS[@]}"; do
-    prompt_files+=("${rollout}/prompts/final_prompt${prompt_length}_${SAMPLING_FINAL_PER_LENGTH}.jsonl")
+    prompt_files+=("${rollout}/prompts/final_prompt${prompt_length}_${final_per_length}.jsonl")
   done
   worker_count="${NUM_GPUS}"
   note "interleave prompt lengths (${SAMPLING_PROMPT_LENGTHS_TEXT}) across ${worker_count} deterministic mixed-length shard(s)"
@@ -885,9 +1108,10 @@ stage_50() {
         --temperature "${SAMPLING_TEMPERATURE}" --top-k "${SAMPLING_TOP_K}" \
         --top-p "${SAMPLING_TOP_P}" --seed "$((SAMPLING_ROLLOUT_SEED + rank * SAMPLING_SEED_STRIDE))" \
         --tensor-parallel-size 1 \
-        --max-seq-length 10240 --prompt-batch-size 16 --inference-backend dynamic \
+        --max-seq-length "${RL_MAX_MODEL_LEN}" --prompt-batch-size "${FINAL_PROMPT_BATCH_SIZE}" \
+        --inference-backend dynamic \
         ${INFERENCE_PRECISION_ARGS[@]+"${INFERENCE_PRECISION_ARGS[@]}"} \
-        --ignore-eos --strict-generation --stream-output \
+        --preserve-eos-token --strict-generation --stream-output \
         --output-file "${outputs[rank]}")
       printf -v printable '%q ' "${command[@]}"; note "command: ${printable}"
       if [[ "${DRY_RUN}" != "1" ]]; then
@@ -944,19 +1168,6 @@ PY
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-rollout.done"
   fi
 
-  if [[ -f "${STAGE_DIR}/50-deduplication.done" ]]; then
-    note 'substage 50-deduplication already complete'
-    require_nonempty_file "${dedup}/representatives.fasta" 'deduplicated representative FASTA'
-    require_nonempty_file "${dedup}/mapping.csv" 'deduplication mapping'
-    check_success_report "${dedup}/report.json"
-  else
-    run evo2_phage_generation deduplicate-fasta \
-      --input-fasta "${fasta}" --output-fasta "${dedup}/representatives.fasta" \
-      --mapping-csv "${dedup}/mapping.csv" --report "${dedup}/report.json"
-    check_success_report "${dedup}/report.json"
-    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-deduplication.done"
-  fi
-
   if [[ -f "${STAGE_DIR}/50-sft-likelihood.done" ]]; then
     note 'substage 50-sft-likelihood already complete'
     require_nonempty_file "${likelihood}/ranked-designs.csv" 'raw SFT likelihood table'
@@ -974,6 +1185,19 @@ PY
       --output-csv "${likelihood}/ranked-designs.csv"
     require_nonempty_file "${likelihood}/ranked-designs.csv" 'raw SFT likelihood table'
     [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-sft-likelihood.done"
+  fi
+
+  if [[ -f "${STAGE_DIR}/50-deduplication.done" ]]; then
+    note 'substage 50-deduplication already complete'
+    require_nonempty_file "${dedup}/representatives.fasta" 'deduplicated representative FASTA'
+    require_nonempty_file "${dedup}/mapping.csv" 'deduplication mapping'
+    check_success_report "${dedup}/report.json"
+  else
+    run evo2_phage_generation deduplicate-fasta \
+      --input-fasta "${fasta}" --output-fasta "${dedup}/representatives.fasta" \
+      --mapping-csv "${dedup}/mapping.csv" --report "${dedup}/report.json"
+    check_success_report "${dedup}/report.json"
+    [[ "${DRY_RUN}" == "1" ]] || touch "${STAGE_DIR}/50-deduplication.done"
   fi
 
   if [[ -f "${STAGE_DIR}/50-sequence-safety.done" ]]; then
@@ -1038,10 +1262,13 @@ PY
 from pathlib import Path
 import sys
 import yaml
+from Bio import SeqIO
+from bionemo.evo2_phage_gen.protein_evidence import stage_coordinate_normalized_reference_gff
 
 base, fasta, output = Path(sys.argv[1]), Path(sys.argv[2]).resolve(), Path(sys.argv[3]).resolve()
 remove_filter = sys.argv[4] == "true"
 config = yaml.safe_load(base.read_text())
+output.mkdir(parents=True, exist_ok=True)
 config.update({
     "results_save_dir": str(output / "arc"),
     "current_config_file": str(output / "config.yaml"),
@@ -1059,7 +1286,19 @@ config.update({
     "genetic_architecture_visualization_and_synteny_filtering": True,
     "use_reference_genome": True,
 })
-output.mkdir(parents=True, exist_ok=True)
+repo_root = base.resolve().parents[3]
+reference_fasta = repo_root / config["genetic_architecture_reference_genome"]
+reference_gff = repo_root / config["reference_genome_gff_file_save_location"]
+reference_records = list(SeqIO.parse(reference_fasta, "fasta"))
+if len(reference_records) != 1:
+    raise ValueError("The Arc architecture reference FASTA must contain exactly one sequence")
+staged_reference_gff = output / "reference_genome.coordinate_normalized.gff"
+stage_coordinate_normalized_reference_gff(
+    reference_gff,
+    staged_reference_gff,
+    circular_genome_length=len(reference_records[0].seq),
+)
+config["reference_genome_gff_file_save_location"] = str(staged_reference_gff)
 (output / "config.yaml").write_text(yaml.safe_dump(config, sort_keys=False))
 PY
   }
@@ -1153,7 +1392,7 @@ PY
   fi
 }
 
-printf '%s\n' '00 prepare inputs/tools/controls' '10 safety-screen and prepare SFT' '20 train/select/evaluate SFT' '30 calibrate sampling' '40 prepare SFT checkpoint for RL; pilot/check/train/monitor/select GDPO' '50 generate, deduplicate, SFT-score, hard-QC, cluster, and report 1,000 genomes' > "${RESULT_ROOT}/stage-plan.txt"
+printf '%s\n' '00 prepare inputs/tools/controls' '10 safety-screen and prepare SFT' '20 train/select/evaluate SFT' '30 calibrate sampling' '40 prepare SFT checkpoint for RL; pilot/check/train/monitor/select GDPO' '50 generate, SFT-score, deduplicate, hard-QC, cluster, and report 1,000 genomes' > "${RESULT_ROOT}/stage-plan.txt"
 for id in 00 10 20 30 40 50; do
   ((10#${id} < 10#${RESUME_FROM})) && continue
   [[ "${PREPARE_ONLY}" == "1" && "${id}" != 00 ]] && continue

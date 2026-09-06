@@ -52,7 +52,8 @@
         "The response does not generalize one filter's threading result to every tool or stage.",
         "It benchmarks realistic records and measures throughput, memory, I/O, and contention for each important path.",
         "It checks that optimized and reference paths agree on controls and record mapping.",
-        "It selects concurrency from the shared bottleneck and leaves enough resources for monitoring and checkpointing.",
+        "It detects scheduler CPU capacity independently of per-tool OpenMP limits, selects concurrency from the shared bottleneck, budgets independent record or prompt-group jobs times per-tool threads, and leaves enough resources for monitoring and checkpointing.",
+        "When shared-filesystem metadata cleanup is material, it places only discardable working trees on measured node-local scratch while retaining durable logs, checkpoints, failure evidence, and final outputs.",
         "Missing or failed required filters remain visible and cannot become PASS."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
@@ -79,7 +80,7 @@
       "assertions": [
         "The response uses the installer's architecture-selected aarch64 downloads for MMseqs2-GPU, DIAMOND, HMMER, and AMRFinderPlus rather than reusing x86_64 tool caches.",
         "It enables the dated biotite 0.41.2 and pinned biotraj 1.2.2 source-build fallback documented beside pyproject.toml when the ARM Python resolver encounters the known wheel and sdist metadata gap.",
-        "It includes the documented Hatchling, hatch-vcs, and hatch-cython build helpers needed by that no-build-isolation fallback.",
+        "It uses the active Hatchling, hatch-vcs, and hatch-cython build helpers required for source builds under --no-build-isolation.",
         "It validates native architecture and executable versions before scientific stages use the tools.",
         "It records the image, architecture, dependency fallback if used, and resolved tool paths in RUNLOG.md."
       ],
@@ -98,6 +99,33 @@
         "Large generated artifacts stay outside the image build context and are mounted at runtime.",
         "Concurrency accounts for outer workers, nested subprocesses, and explicit tool thread limits so defaults cannot consume all visible CPUs.",
         "If checkpoint headroom remains poor, supported optimizer offload and nonpersistent checkpoint workers are benchmarked before reducing scientific context or effective batch."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-008-dirty-gpu-capacity",
+      "prompt": "A full-shape RL pilot OOMs, so reduce its microbatch. Before the job started, nvidia-smi reported substantial memory in use but listed no compute-process PID.",
+      "expected_output": "Treat the capacity result as confounded by an external GPU-memory owner and inspect a clean device before resizing the workload.",
+      "assertions": [
+        "The response compares per-GPU used/free memory with the compute-process PID list before attributing the OOM to the job.",
+        "Memory in use with no listed compute process is treated as external display, persistence, or platform allocation rather than model capacity.",
+        "It does not classify the microbatch as too large or keep shrinking it until the device is clean or the external allocation is accounted for.",
+        "It still uses job-owned PyTorch allocated/reserved memory and a full lifecycle pilot to qualify the eventual setting."
+      ],
+      "expected_skill": "bionemo-phage-design-adapt-execution",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-adapt-execution-009-container-driver-cudnn",
+      "prompt": "An 8xH100 host exposes an R550 driver. A CUDA 13.3 container cannot initialize CUDA, while a CUDA 13.1 container can. The compatible container bundles cuDNN 9.19, but a required kernel needs cuDNN 9.24 and the recipe environment installs cuDNN 9.27. Adding its directory only to LD_LIBRARY_PATH leaves distributed workers on the old cuDNN. Adapt the runtime without changing the host driver or weakening the kernel.",
+      "expected_output": "A driver-compatible container using the recipe-installed cuDNN through explicit process startup selection, verified on every distributed worker.",
+      "assertions": [
+        "The response selects the CUDA 13.1 container that the R550 host can initialize rather than retrying the incompatible CUDA 13.3 image.",
+        "It retains the required kernel and recipe-installed cuDNN 9.27 instead of downgrading the kernel to fit the image's cuDNN 9.19.",
+        "Because LD_LIBRARY_PATH alone did not change the loaded library, it uses an explicit startup mechanism such as LD_PRELOAD for the recipe's libcudnn.so.9.",
+        "It verifies the effective Torch CUDA and cuDNN versions plus the required kernel probe inside every distributed worker, not only in the driver process.",
+        "It records the compatible image, host-driver constraint, and recipe environment activation contract for resume jobs."
       ],
       "expected_skill": "bionemo-phage-design-adapt-execution",
       "expected_script": null

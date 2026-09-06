@@ -15,7 +15,8 @@
         "The response treats 12,000 steps as a historical starting hypothesis, recalibrates a ceiling from usable corpus and effective batch, schedules enough comparable validation and checkpoint events, and selects the lowest comparable validation-loss checkpoint.",
         "The response treats local training and validation metrics as sufficient; optional remote reporting does not gate the scientific run or checkpoint decision.",
         "The selected-checkpoint review includes verified training bytes or tokens, markers, orientation, tokenizer, BOS/EOS, wrappers, padding, and masking for RL sampling calibration.",
-        "Before NeMo-RL, it creates a separate model-only SFT checkpoint that retains serialized model object state, strips optimizer, scheduler, RNG, and training state, sanitizes runtime callbacks and timers, records provenance, and leaves the resumable SFT source unchanged."
+        "Before NeMo-RL, it creates a separate model-only SFT checkpoint that retains serialized model object state, strips optimizer, scheduler, RNG, and training state, sanitizes runtime callbacks and timers, records provenance, and leaves the resumable SFT source unchanged.",
+        "It validates the succeeded schema-2 model-only payload for RL and downstream likelihood scoring, while retaining the full-state source for exact SFT resume."
       ],
       "expected_skill": "bionemo-phage-design-operate-mbridge-sft",
       "expected_script": null
@@ -82,6 +83,7 @@
       "assertions": [
         "The response explains that a larger global batch produces fewer optimizer updates per epoch and does not treat completion of one epoch as evidence of convergence.",
         "Because the final comparable validation is still best and has not rebounded, the response recommends resuming from the compatible checkpoint and extending the training ceiling rather than declaring the run complete.",
+        "The resume restores the saved step, optimizer, scheduler, and RNG state; it does not reset training by forcing the base checkpoint into finetune mode.",
         "The continuation is sized and monitored using optimizer updates plus examples or tokens seen, with enough comparable validation points to distinguish continued improvement from a plateau or rebound; several epochs may be appropriate, but no fixed epoch count is imposed.",
         "Checkpoint selection remains based on the lowest credible comparable validation loss, and the held-out test split is not used to decide how long to train."
       ],

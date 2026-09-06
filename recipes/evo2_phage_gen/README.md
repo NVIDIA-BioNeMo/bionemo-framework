@@ -9,10 +9,11 @@ reinforcement learning (RL) stage, which optimizes generation toward user-define
 design criteria rather than relying only on post-generation filtering.
 
 The included PhiX174 example follows Samuel King's recommended set of filters (1–6, 8, and 9) from
-[Figure 2H](https://www.science.org/doi/10.1126/science.aec2657#F2). These become RL objectives with
-partial credit for candidates that approach each threshold. See the
+[Figure 2H](https://www.science.org/doi/10.1126/science.aec2657#F2). Their measurable constraints are
+represented as separate graded or categorical RL objectives; reward full-credit regions, final
+per-genome gates, and set-level diversity selection are distinct. See the
 [PhiX174 GDPO score definitions](examples/README.md#current-phix174-gdpo-score-definitions) for the
-objective definitions and partial-credit rules. The publication reported 15 filter passers among
+objective definitions and hard-filter relationships. The publication reported 15 filter passers among
 110,000 generated sequences. An earlier completed end-to-end GDPO run produced 610 target-profile
 passes among 1,000 designs, while the latest run retained 511 post-QC accepted representatives among
 1,000 designs. These results are descriptive rather than a controlled enrichment comparison because

@@ -9,6 +9,11 @@ run_id: "phix174_gdpo"
 
 checkpointing:
   checkpoint_dir: "data/checkpoints/${run_id}"
+  # Preserve distributed Adam state for an exact compatible resume. Keep the already-batched QC
+  # actor at max_concurrency=1 and monitor host RSS through the first save: excess actor threads can
+  # create a host-memory staircase that makes checkpoint serialization look causal. Use an explicit
+  # false override only as a qualified model-only fallback; that restart initializes fresh Adam.
+  save_optimizer: true
   pretrained_checkpoint:
     # Start GDPO from the converted base Evo2 Microviridae checkpoint, not from a prior RL run.
     path: "data/checkpoints/evo2_7b_microviridae_mbridge"
@@ -17,8 +22,14 @@ checkpointing:
   higher_is_better: true
 
 grpo:
+  # Legacy synchronous GRPO stops at either limit. This 96-row bank yields six updates per epoch
+  # at 16 prompts/update, so 500 epochs permits 3,000 updates and cannot truncate the 500-step run.
   max_num_epochs: 500
-  num_prompts_per_step: 2
+  # Sixteen prompt records cover two examples from each anchor-by-length stratum.
+  # Forty-eight generations per prompt make a 768-rollout global update; on DP8 each
+  # H100 receives one packed 96-request generation wave. This is the largest tested
+  # one-wave point below the 1,024-rollout recurrent-state capacity limit on 8xH100.
+  num_prompts_per_step: 16
   num_generations_per_prompt: 48
   max_num_steps: 500
   val_period: 10
@@ -45,9 +56,14 @@ loss_fn:
   token_level_loss: false
 
 policy:
-  train_global_batch_size: 96
-  train_micro_batch_size: 1
-  generation_batch_size: 96
+  max_total_sequence_length: 5632
+  train_global_batch_size: 768
+  # Qualified 8xH100 default, not a measured ceiling. At TP1 its Evo2 7B local GLU span is
+  # 8 * 5632 * 11008 = 495,976,448 elements. This shape passed three updates, scheduled and terminal
+  # validation, and an optimizer-state reload. A single GB300 qualified offload-cache MBS32, but
+  # that does not establish per-device H100 capacity. TP2 halves local FFN width; DP does not.
+  train_micro_batch_size: 8
+  generation_batch_size: 768
   logprob_batch_size: 1
   megatron_cfg:
     tensor_model_parallel_size: 1
@@ -57,13 +73,17 @@ policy:
     scheduler:
       lr_warmup_init: 1.0e-7
   generation:
-    max_new_tokens: 5976
+    max_new_tokens: 5420
     temperature: 1.0
+    # Retain the complete top-5 support so nucleus filtering cannot remove terminal EOD.
     top_p: 1.0
-    top_k: 4
+    top_k: 5
     mcore_generation_config:
-      max_requests: 12
-      prompt_batch_size: 12
+      max_requests: 96
+      prompt_batch_size: 96
+      # Free the native paged-KV and packed Hyena state before policy training. Restoring these
+      # buffers changes their addresses, so the adapter recaptures and verifies decode graphs.
+      kv_cache_management_mode: "offload"
       cuda_graph_impl: "local"
       inference_cuda_graph_scope: "block"
       use_cuda_graphs_for_non_decode_steps: true
@@ -74,10 +94,13 @@ policy:
         # so validation/train steps do not reuse the same sampling seed.
         seed: 42
         seed_stride: 1000003
-        # Whole-genome rollouts require the requested completion length. Suppressing EOS also
-        # keeps every 12-request DP shard on the same packed dynamic decode schedule.
-        ignore_eos: true
+        # Let the policy learn when to terminate and retain the sampled EOD action and log-probability.
+        ignore_eos: false
+        preserve_eos_token: true
         strict_generation: true
+        # Capacity-gated opt-in: retaining Adam state avoids a CPU round trip each RL step but
+        # consumes its full GPU footprint throughout generation.
+        preserve_optimizer_state_during_generation: false
 
   # This NeMo-RL switch controls gradient-bearing policy/log-prob packing, not rollout packing.
   # Keep it off until Evo2's packed loss/backward path has a separate correctness and throughput A/B;
@@ -117,6 +140,7 @@ env:
     weight_protein_hit_count: 1.0
     weight_tropism: 1.0
     weight_synteny: 0.25
+    weight_gene_a_origin: 0.25
     weight_average_protein_identity: 0.25
     weight_required_genes: 0.1
     weight_mmseqs_cluster_diversity: 1.0
@@ -136,9 +160,6 @@ env:
       - name: "dustmask_end"
         columns: ["reward_dustmask_end"]
         requires_safety_eligibility: true
-      - name: "nucleotide_pass"
-        columns: ["reward_nucleotide_pass"]
-        requires_safety_eligibility: true
       - name: "protein_hit_count"
         columns: ["reward_external_protein_hit_count"]
         requires_safety_eligibility: true
@@ -150,6 +171,9 @@ env:
         requires_safety_eligibility: true
       - name: "synteny"
         columns: ["reward_external_synteny"]
+        requires_safety_eligibility: true
+      - name: "gene_a_origin"
+        columns: ["reward_gene_a_origin"]
         requires_safety_eligibility: true
       - name: "average_protein_identity"
         columns: ["reward_external_average_protein_identity"]
@@ -178,13 +202,15 @@ env:
       synteny_mode: "full"
       enable_average_protein_identity: true
       enable_required_genes: true
-      required_genes_evidence_target: 9.0
+      required_genes_evidence_target: 10.0
+      protein_match_min_reciprocal_coverage: 0.75
+      tropism_match_min_reciprocal_coverage: 0.95
       # Per external-QC reward run; set lower if several environment actors score concurrently.
       lovis4u_parallel_jobs: 32
       lovis4u_mmseqs_threads: 8
       lovis4u_collect_pdfs: false
     sequence_safety:
-      batch_size: 128
+      batch_size: 256
       orf_workers: 32
       threads: 32
       phrogs_threads: 64
@@ -198,6 +224,7 @@ env:
       cov_mode: 0
       seq_id_mode: 0
       cluster_mode: 0
+      parallel_jobs: 1
       threads: 64
       verbosity: 0
 

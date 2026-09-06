@@ -708,6 +708,16 @@ def finalize_rollout_report(
     if set(cluster_representatives) != set(cluster_by_member.values()):
         raise ValueError("cluster representative FASTA and membership table disagree")
 
+    sampling_payload: dict[str, Any] | None = None
+    if sampling_selection is not None:
+        import yaml
+
+        sampling_payload = yaml.safe_load(Path(sampling_selection).read_text())
+        if not isinstance(sampling_payload, dict):
+            raise ValueError("sampling selection must be a YAML mapping")
+    prompt_anchors = sampling_payload.get("prompt_anchors", []) if sampling_payload else []
+    mixed_circular_origins = isinstance(prompt_anchors, list) and len(prompt_anchors) > 1
+
     score_rows = _load_likelihoods(likelihood_csv, raw_ids)
     score_by_id = {str(row["record_id"]): row for row in score_rows}
     lengths = [len(sequence) for _, sequence in raw_records]
@@ -715,7 +725,7 @@ def finalize_rollout_report(
     rho, p_value = _spearman(lengths, scores)
     informative_scores = len(set(scores)) > 1
     strong_length_association = rho is not None and abs(rho) >= 0.5
-    apply_likelihood_order = informative_scores and not strong_length_association
+    apply_likelihood_order = informative_scores and not strong_length_association and not mixed_circular_origins
     if apply_likelihood_order:
         accepted_ids = [
             str(row["record_id"]) for row in score_rows if str(row["record_id"]) in set(cluster_representatives)
@@ -758,13 +768,6 @@ def finalize_rollout_report(
 
     _write_fasta(accepted_fasta, [(record_id, sequence_by_id[record_id]) for record_id in accepted_ids])
     duplicate_count = len(raw_ids) - len(representative_ids)
-    sampling_payload: dict[str, Any] | None = None
-    if sampling_selection is not None:
-        import yaml
-
-        sampling_payload = yaml.safe_load(Path(sampling_selection).read_text())
-        if not isinstance(sampling_payload, dict):
-            raise ValueError("sampling selection must be a YAML mapping")
     evidence = {
         "deduplication": _load_optional_report(deduplication_report),
         "hard_qc": _load_optional_report(hard_qc_report),
@@ -813,6 +816,7 @@ def finalize_rollout_report(
             "score": "mean_log_probability_per_nucleotide",
             "conditioning_prefix": "+~",
             "applied_to_accepted_candidate_order": apply_likelihood_order,
+            "comparable_across_circular_prompt_origins": not mixed_circular_origins,
             "residual_length_association": {
                 "method": "Spearman correlation across all raw generated designs",
                 "n": len(raw_ids),
@@ -821,7 +825,12 @@ def finalize_rollout_report(
                 "strong_correlation_threshold_abs_rho": 0.5,
                 "strong_correlation": strong_length_association,
             },
-            "interpretation": "Within-protocol prioritization only; not a bootability probability or threshold.",
+            "interpretation": (
+                "Recorded but not used for cross-origin ordering because whole-sequence SFT likelihood depends on "
+                "the linearized circular origin."
+                if mixed_circular_origins
+                else "Within-protocol prioritization only; not a bootability probability or threshold."
+            ),
         },
         "sequence_safety_provenance": _safety_provenance(safety_manifest),
         "evidence": evidence,
@@ -835,6 +844,12 @@ def finalize_rollout_report(
     }
     output_json.parent.mkdir(parents=True, exist_ok=True)
     output_json.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")
+    if mixed_circular_origins:
+        likelihood_summary = "Likelihood was recorded but not used to order mixed-origin circular designs."
+    elif apply_likelihood_order:
+        likelihood_summary = "Likelihood was used for within-protocol ordering after the length check."
+    else:
+        likelihood_summary = "Likelihood was recorded but did not pass the ordering checks."
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(
         "# PhiX174 run summary\n\n"
@@ -847,7 +862,7 @@ def finalize_rollout_report(
         f"- Safety-PASS target hard-QC representatives: {counts['hard_qc_pass_representatives']}\n"
         f"- Post-QC 99%-identity clusters and accepted representatives: {counts['post_qc_99pct_clusters']}\n\n"
         "Order: raw generation → biological deduplication → safety and hard QC → post-QC clustering → ranking.\n\n"
-        "Likelihood is a within-protocol ranking signal, not a universal bootability threshold. "
+        f"{likelihood_summary} Likelihood is a within-protocol signal, not a universal bootability threshold. "
         "Computational candidates are not evidence of wet-lab viability or safety.\n"
     )
     return output_json

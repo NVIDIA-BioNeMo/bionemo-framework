@@ -53,6 +53,74 @@
       ],
       "expected_skill": "bionemo-phage-design-collect-genomes",
       "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-collect-genomes-005-termini-class",
+      "prompt": "A lambda-like Caudoviricetes reference has a GenBank LOCUS marked circular, no exact direct or inverted terminal repeat, partial CDS markers at both ends, and no origin-spanning join(). Close relatives share consistent endpoints rather than aligning as different rotations. Determine its termini class before planning ORF calling, prompts, and synteny; raw reads are not currently available.",
+      "expected_output": "A fixed-end cos/cohesive-end classification that does not mistake absence of terminal repeats for headful permutation.",
+      "assertions": [
+        "The response determines termini class rather than trusting LOCUS or inferring fixed ends from linearity alone.",
+        "It checks DTR and reverse-complement ITR, then uses consistent relative endpoints plus the lambda-like lineage to identify fixed cos/cohesive ends despite no terminal repeat; relatives aligning as different rotations would instead support headful permutation.",
+        "It preserves absolute endpoints, rejects arbitrary rotation for prompts and synteny, uses linear ORF handling, and does not invent a DTR reward for a cos genome.",
+        "It names PhageTerm as the read-coverage gold standard when suitable ligation-based reads become available and rejects shared first-gene identity as termini evidence.",
+        "It treats any pseudocircular ORF prefix as a representation choice rather than evidence of biological termini."
+      ],
+      "expected_skill": "bionemo-phage-design-collect-genomes",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-collect-genomes-006-canonical-phix-topology",
+      "prompt": "Is PhiX174 circular, and do I need a new literature search before choosing its ORF-calling and prompt-rotation behavior?",
+      "expected_output": "A direct canonical classification without unnecessary research.",
+      "assertions": [
+        "The response states directly that PhiX174 is a genuinely circular ssDNA Microviridae genome and permits circular ORF handling and prompt rotation.",
+        "It uses canonical phage or family knowledge for this standard case rather than launching broad literature research merely to reconfirm it.",
+        "It distinguishes a pseudocircular ORF prefix from evidence about biological termini.",
+        "It reserves deposit-level or primary-source investigation for ambiguous identities, atypical assemblies, or evidence that conflicts with the canonical classification."
+      ],
+      "expected_skill": "bionemo-phage-design-collect-genomes",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-collect-genomes-007-collapsed-dtr-artifact",
+      "prompt": "Resolve the termini of OY979411.1. LOCUS says circular and its deposited sequence has an exact 127-nt terminal overlap, but 127 is common across unrelated assemblies and properly terminated Drulisvirus relatives carry approximately 250-nt DTRs. State which molecular sequence should drive genome length and coding-density calculations.",
+      "expected_output": "A linear fixed-end classification that rejects the 127-nt assembler artifact, recovers the collapsed biological DTR, and distinguishes deposited from packaged sequence forms.",
+      "assertions": [
+        "The response rejects the 127-nt overlap as an assembler k-mer artifact rather than calling it the biological DTR, using recurrence across unrelated sizes or families plus its hard mismatch-tolerant cutoff as convergent evidence rather than treating k-mer length alone as decisive.",
+        "It validates the detector against a published DTR and searches a broad congener corpus for properly terminated genomes rather than concluding from one small panel.",
+        "It maps congener DTRs onto the collapsed deposit to recover the internal DTR copy and true origin while retaining the fixed-end Drulisvirus classification.",
+        "It distinguishes the circularly permuted deposited repeat unit [DTR][unique] from the packaged genome [DTR][unique][DTR], whose length is the deposit plus one DTR copy.",
+        "It explicitly chooses and records one molecular form for length, coding density, coordinates, prompts, synteny, and rewards rather than mixing forms across objectives."
+      ],
+      "expected_skill": "bionemo-phage-design-collect-genomes",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-collect-genomes-008-phageterm-outcomes",
+      "prompt": "Interpret PhageTerm results for several phage references: COS (3'), DTR (long), Headful (pac), Headful, Mu-like, Multiple, and Unknown.",
+      "expected_output": "A direct mapping from PhageTerm's reported vocabulary to endpoint, rotation, molecular-form, and therapeutic-safety decisions.",
+      "assertions": [
+        "The response preserves PhageTerm's distinct COS (5') and COS (3'), DTR (short) and DTR (long), Headful (pac) and Headful, Mu-like, Multiple, and Unknown outcomes rather than collapsing them into fewer labels.",
+        "It treats COS polarity as synthesis-relevant, short and long DTRs as different length budgets, and both headful classes as circularly permuted with rotation allowed while retaining whether a pac site was detected.",
+        "It treats Mu-like as host-DNA termini from a transposable temperate phage and rejects it for therapeutic design rather than treating it as only a coordinate convention.",
+        "It treats Multiple and Unknown as reported inconclusive outcomes that require diagnosis or corroboration, not as tool crashes or permission to assume rotation.",
+        "It uses sequence- and relative-based termini inference as the fallback when suitable reads are unavailable and notes that paired-end reads are preferred rather than claiming PhageTerm is reads-only."
+      ],
+      "expected_skill": "bionemo-phage-design-collect-genomes",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-collect-genomes-009-phageterm-library-prep",
+      "prompt": "I have a phage assembly and Illumina reads. PhageTerm reports no termini, but the reads came from a Nextera library. Can I classify the genome as Headful and rotate it? Also identify the maintained PhageTerm release source.",
+      "expected_output": "A refusal to interpret a negative PhageTerm result from a transposase-prepared library, followed by the sequence-only fallback and maintained tool source.",
+      "assertions": [
+        "The response checks library preparation before interpreting a negative result: PhageTerm requires termini available to ligation after random fragmentation, with paired-end reads preferred.",
+        "It explains that Nextera or another transposase-based prep destroys the termini signal, so no detected termini is uninformative rather than evidence for Headful packaging or permission to rotate.",
+        "It falls back to sequence, annotation, taxonomy, and relative-genome evidence instead of downloading or rerunning structurally unsuitable reads.",
+        "It points to the maintained Pasteur GitLab PhageTerm releases rather than the paper's stale SourceForge location."
+      ],
+      "expected_skill": "bionemo-phage-design-collect-genomes",
+      "expected_script": null
     }
   ]
 }

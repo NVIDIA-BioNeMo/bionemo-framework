@@ -12,10 +12,19 @@ PIPELINE_SCRIPT="${PIPELINE_SCRIPT:?PIPELINE_SCRIPT is required}"
 TOOL_BIN_DIR="${TOOL_BIN_DIR:?TOOL_BIN_DIR is required}"
 REFERENCE_FASTA="${REFERENCE_FASTA:?REFERENCE_FASTA is required}"
 SFT_FASTA="${SFT_FASTA:?SFT_FASTA is required}"
+SAFETY_ASSET_MANIFEST="${SAFETY_ASSET_MANIFEST:?SAFETY_ASSET_MANIFEST is required}"
+SAFETY_POLICY="${SAFETY_POLICY:?SAFETY_POLICY is required}"
+SAFETY_HOST_DOMAIN="${SAFETY_HOST_DOMAIN:?SAFETY_HOST_DOMAIN is required}"
+SAFETY_HOST_EVIDENCE_JSON="${SAFETY_HOST_EVIDENCE_JSON:?SAFETY_HOST_EVIDENCE_JSON is required}"
 SCORE_ROOT="${SCORE_ROOT:-${CALIBRATION_ROOT}/scoring}"
 EXPECTED_RECORDS="${EXPECTED_RECORDS:-64}"
 WORKERS="${WORKERS:-8}"
 THREADS_PER_WORKER="${THREADS_PER_WORKER:-12}"
+SAFETY_BATCH_SIZE="${SAFETY_BATCH_SIZE:-${EXPECTED_RECORDS}}"
+SAFETY_THREADS_PER_WORKER="${SAFETY_THREADS_PER_WORKER:-${THREADS_PER_WORKER}}"
+SAFETY_ORF_WORKERS_PER_WORKER="${SAFETY_ORF_WORKERS_PER_WORKER:-${THREADS_PER_WORKER}}"
+SAFETY_PHROGS_THREADS_PER_WORKER="${SAFETY_PHROGS_THREADS_PER_WORKER:-${THREADS_PER_WORKER}}"
+SAFETY_TIMEOUT_SECONDS="${SAFETY_TIMEOUT_SECONDS:-1800}"
 MAX_RETRIES="${MAX_RETRIES:-1}"
 CELL_TIMEOUT_SECONDS="${CELL_TIMEOUT_SECONDS:-7200}"
 NOVELTY_TIMEOUT_SECONDS="${NOVELTY_TIMEOUT_SECONDS:-7200}"
@@ -42,7 +51,7 @@ run_worker() {
   local manifest="${SCORE_ROOT}/logs/worker-${slot}.tsv"
   printf 'cell\tattempt\tstatus\tfinished_at\n' > "${manifest}"
 
-  while IFS=$'\t' read -r -u 3 cell_index cell _prefix _temperature _prompt_file generation_jsonl; do
+  while IFS=$'\t' read -r -u 3 cell_index cell _prefix _temperature _prompt_file generation_jsonl _prompt_anchor _prompt_anchor_start; do
     [[ "${cell_index}" == "index" ]] && continue
     (( cell_index % WORKERS == slot )) || continue
 
@@ -67,6 +76,15 @@ run_worker() {
           --work-dir "${SCORE_ROOT}/work/${cell}" \
           --tool-bin-dir "${TOOL_BIN_DIR}" \
           --threads "${THREADS_PER_WORKER}" \
+          --safety-asset-manifest "${SAFETY_ASSET_MANIFEST}" \
+          --safety-policy "${SAFETY_POLICY}" \
+          --safety-host-domain "${SAFETY_HOST_DOMAIN}" \
+          --safety-host-evidence-json "${SAFETY_HOST_EVIDENCE_JSON}" \
+          --safety-timeout-seconds "${SAFETY_TIMEOUT_SECONDS}" \
+          --safety-batch-size "${SAFETY_BATCH_SIZE}" \
+          --safety-threads "${SAFETY_THREADS_PER_WORKER}" \
+          --safety-orf-workers "${SAFETY_ORF_WORKERS_PER_WORKER}" \
+          --safety-phrogs-threads "${SAFETY_PHROGS_THREADS_PER_WORKER}" \
           > "${log}" 2>&1 &&
         python -m bionemo.evo2_phage_gen.calibration_scoring validate \
           --score-csv "${partial}" --expected-records "${EXPECTED_RECORDS}" >> "${log}" 2>&1; then

@@ -107,6 +107,26 @@ def _new_step_environment(
     return env_cls, env
 
 
+def test_phage_qc_actor_serializes_already_batched_calls():
+    """Avoid a redundant Ray thread pool and its per-thread allocator arenas."""
+    if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
+        pytest.skip("NeMo-RL is unavailable")
+
+    assert nemo_rl_env.PhageQCEnvironment._default_options["max_concurrency"] == 1
+
+
+def test_phage_qc_actor_keeps_cpu_scoring_off_policy_gpus():
+    """A CPU-reserved QC actor must not retain model state on a policy GPU."""
+    if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
+        pytest.skip("NeMo-RL is unavailable")
+
+    env_vars = nemo_rl_env.PhageQCEnvironment._default_options["runtime_env"]["env_vars"]
+
+    assert env_vars["PHAGEHOSTLEARN_ESM_DEVICE"] == "cpu"
+    assert env_vars["PHAGEHOSTLEARN_CUDA_VISIBLE_DEVICES"] == ""
+    assert env_vars["CUDA_VISIBLE_DEVICES"] == ""
+
+
 def test_extract_assistant_sequence_concatenates_assistant_messages():
     """Only assistant messages should contribute to generated DNA."""
     message_log = [
@@ -228,6 +248,30 @@ def test_environment_requires_enabled_sequence_safety(tmp_path: Path):
         env_cls({"sequence_safety": disabled})
 
 
+def test_environment_maps_genome_length_reward_bounds(tmp_path: Path):
+    """The resolved RL environment must not fall back to the broad hard-QC interval."""
+    if getattr(nemo_rl_env, "_NEMO_RL_IMPORT_ERROR", None) is not None:
+        pytest.skip("NeMo-RL is unavailable")
+
+    env_cls = nemo_rl_env.PhageQCEnvironment.__ray_metadata__.modified_class
+    env = env_cls(
+        {
+            "sequence_safety": _sequence_safety_mapping(tmp_path),
+            "genome_length_reward_lower_zero": 3000,
+            "genome_length_reward_lower_full": 5359,
+            "genome_length_reward_upper_full": 5391,
+            "genome_length_reward_upper_zero": 5426,
+        }
+    )
+
+    assert (
+        env.config.genome_length_reward_lower_zero,
+        env.config.genome_length_reward_lower_full,
+        env.config.genome_length_reward_upper_full,
+        env.config.genome_length_reward_upper_zero,
+    ) == (3000.0, 5359.0, 5391.0, 5426.0)
+
+
 def test_gdpo_objective_scores_reduce_named_columns_positionally():
     """GDPO helper should build a stable [B, K] objective table without adding aggregate reward."""
     scored = pd.DataFrame(
@@ -263,6 +307,7 @@ def test_default_gdpo_objectives_expose_three_independent_safety_signals():
     ]
     assert all(objective.requires_safety_eligibility is False for objective in safety_objectives)
     assert all(objective.requires_safety_eligibility is True for objective in objectives[:-3])
+    assert all("reward_nucleotide_pass" not in objective.columns for objective in objectives)
 
 
 @pytest.mark.parametrize("invalid", ["false", 0, 1, None])
@@ -975,7 +1020,7 @@ def test_scored_records_exclude_full_sequence_from_rollout_metadata():
             "safety_nested_payload": [{"state": "PASS"}],
             "safety_list_payload": [["PASS"]],
             "safety_unbounded_payload": ["x" * 4097],
-            "safety_invalid_unicode": ["\ud800"],
+            "safety_invalid_unicode": pd.Series(["\ud800"], dtype=object),
             "reward_nonfinite": [float("inf")],
             "reward_nan": [float("nan")],
             "reward_complex": [1 + 2j],

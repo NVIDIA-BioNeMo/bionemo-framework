@@ -137,3 +137,24 @@ def test_train_installs_metric_retention(monkeypatch):
     assert callback.keep_recent_k == 1
     assert callback.step_tolerance == 3
     assert callback.strict_metric is True
+
+
+def test_finetune_base_keeps_resume_mode(tmp_path, monkeypatch):
+    checkpoint = tmp_path / "base"
+    checkpoint.mkdir()
+    (checkpoint / "run_config.yaml").write_text("model: {}\n")
+
+    cfg = MagicMock()
+    cfg.checkpoint.load = str(tmp_path / "run" / "evo2" / "checkpoints")
+    cfg.checkpoint.finetune = False
+    mocked_pretrain = MagicMock()
+    monkeypatch.setattr(train_module, "pretrain_config", MagicMock(return_value=cfg))
+    monkeypatch.setattr(train_module, "pretrain", mocked_pretrain)
+    monkeypatch.setattr(train_module, "get_rank_safe", lambda: 1)
+    monkeypatch.setattr(train_module.torch.distributed, "is_initialized", lambda: False)
+
+    args = parse_args(["--mock-data", "--finetune-ckpt-dir", str(checkpoint)])
+    train_module.train(args)
+
+    assert cfg.checkpoint.pretrained_checkpoint == str(checkpoint.resolve())
+    assert cfg.checkpoint.finetune is False

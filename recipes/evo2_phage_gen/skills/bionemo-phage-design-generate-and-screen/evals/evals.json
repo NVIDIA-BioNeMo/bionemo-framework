@@ -26,9 +26,10 @@
         "When pre-safety QC excludes representatives, the response preserves those exclusions in the representative denominator and requires exact manifest coverage for the sequences actually submitted to safety.",
         "Short genomes, no ORFs, missing genes, and empty or header-only tool output do not crash or silently skip QC.",
         "It disables pre-QC clustering, clusters only the safety-PASS hard-QC set, preserves complete candidate-to-result and cluster mapping, and reports raw, representative, PASS, FAIL, INDETERMINATE, hard-QC, and clustered counts.",
-        "It reports total and mean per-nucleotide selected-SFT log probability for every design, checks residual score-length correlation, and uses likelihood ordering only when that diagnostic supports it.",
-        "It defaults medium/long generation to packed dynamic inference for uniform or mixed prompts, including exact-length data-parallel GDPO rollouts, captures only physical full/remainder request shapes, preserves request IDs and request-to-Mamba-state mappings across staggered KV-page rollovers, and qualifies multi-page packed parity with prediction-forward selected-action checks using reconstructed target-preserving top-k/top-p support and page-boundary phase diagnostics; it reuses graphs only while registered model storage is stable, makes every TP/PP/CP rank in a DP replica recapture after any participant detects an address rebind, recaptures quantized graphs after each refit even with stable addresses, qualifies at least two rollout/offload-refit cycles, distinguishes cold end-to-end from steady-decode throughput and from unqualified gradient-bearing policy sequence packing, notes that dynamic generation ignores the legacy subquadratic flag, reserves static-Flash for a benchmark-qualified equal-length win, selects packed scoring for ragged records or benchmark-qualified rectangular scoring for uniform records/CP, and preserves record mappings.",
+        "It reports total and mean per-nucleotide selected-SFT log probability for every design, checks residual score-length correlation and prompt-origin comparability, uses likelihood ordering only when those diagnostics support it, and does not use origin-dependent likelihood to globally order mixed-origin circular designs.",
+        "It defaults medium/long generation to packed dynamic inference for uniform or mixed prompts, including mixed-length data-parallel GDPO rollouts that retain sampled terminal EOD, captures only physical full/remainder request shapes, preserves request IDs and request-to-Mamba-state mappings across staggered KV-page rollovers, and qualifies multi-page packed parity with prediction-forward selected-action checks using reconstructed target-preserving top-k/top-p support and page-boundary phase diagnostics; it reuses graphs only while registered model storage is stable, makes every TP/PP/CP rank in a DP replica recapture after any participant detects an address rebind, recaptures quantized graphs after each refit even with stable addresses, qualifies at least two rollout/offload-refit cycles, distinguishes cold end-to-end from steady-decode throughput and from unqualified gradient-bearing policy sequence packing, notes that dynamic generation ignores the legacy subquadratic flag and retains CUDA graphs, reserves static-Flash for a benchmark-qualified equal-length win, selects packed scoring for ragged records or benchmark-qualified rectangular scoring for uniform records/CP, and preserves record mappings.",
         "It treats low precision as checkpoint- and hardware-qualified: Hopper regular FP8 with the explicit all-layer scope override and multiple-of-eight strict decode groups is distinguished from Vortex delayed scaling.",
+        "It loads the selected pre-RL SFT from the validated model-only checkpoint recorded by RESULT_ROOT/rl/sft-checkpoint/preparation-manifest.json and scores all raw designs before deduplication, without requiring the full-state SFT checkpoint unless exact SFT resume is requested.",
         "Computational screening is not described as proof of bootability, host range, safety, or efficacy."
       ],
       "expected_skill": "bionemo-phage-design-generate-and-screen",
@@ -58,6 +59,21 @@
         "The independent protein hits remain reportable and are not collapsed into the nucleotide row.",
         "Malformed or unmappable required evidence becomes INDETERMINATE rather than a false PASS.",
         "Any hard AMR exclusion in the approved profile remains enforced."
+      ],
+      "expected_skill": "bionemo-phage-design-generate-and-screen",
+      "expected_script": null
+    },
+    {
+      "id": "bionemo-phage-design-generate-and-screen-005-hard-filter-waterfall",
+      "prompt": "Screen a completed rollout with six approved criteria. The current report applies them as one conjunction and says zero passed. One proposed gate is rollout-relative singleton diversity, another is a classifier saturated at p=1, and the basic-feasibility mask also controlled whether diversity reward was earned during RL. Decide what can be changed post hoc and produce a diagnostic final passing set.",
+      "expected_output": "A cheap-to-expensive hard-filter waterfall that distinguishes valid candidate gates, diagnostics, and in-loop reward coupling.",
+      "assertions": [
+        "The response orders valid gates cheap-to-expensive and reports input, PASS, FAIL, INDETERMINATE, and surviving counts plus failure reasons at every stage rather than only the final conjunction.",
+        "It preserves per-candidate measurements so a post-hoc threshold can be reassessed without rerunning unaffected tools or hiding which stage eliminated the set.",
+        "It does not turn rollout-relative singleton diversity into an intrinsic genome gate, while allowing a separately reported set-level diversity rule when selecting a portfolio.",
+        "It does not use a saturated p=1 model output as a gate without validated positive-negative separation and treats a brittle narrow band similarly.",
+        "It traces the feasibility mask into the online diversity reward, but first permits a proposed replacement gate to be replayed on saved measurements; only adopting the change in-loop requires a new RL attempt, while genuinely post-hoc gates require no retraining.",
+        "Any relaxed or removed post-hoc criterion is versioned and reported rather than silently changed after seeing candidate outcomes."
       ],
       "expected_skill": "bionemo-phage-design-generate-and-screen",
       "expected_script": null

@@ -1069,7 +1069,8 @@ def train(args: argparse.Namespace) -> None:
 
     if args.finetune_ckpt_dir:
         validated_ckpt_dir = _validate_finetune_ckpt_dir(args.finetune_ckpt_dir)
-        cfg.checkpoint.finetune = True
+        # Leave resume mode intact when cfg.checkpoint.load already contains a run checkpoint.
+        # MBridge switches to finetune mode itself only when it falls back to this pretrained checkpoint.
         cfg.checkpoint.pretrained_checkpoint = str(validated_ckpt_dir)
         cfg.checkpoint.dist_ckpt_strictness = "ignore_all"  # necessary unfortunately to avoid extra_state issues.
     if args.nvidia_fault_tolerance:

@@ -304,7 +304,13 @@ def test_final_report_reconciles_raw_and_representative_denominators(tmp_path):
     memberships = tmp_path / "memberships.csv"
     memberships.write_text("representative_id,member_id\na,a\na,c\n")
     selection = tmp_path / "sampling-selection.yaml"
-    selection.write_text("temperature: 1.0\nprompt_lengths: [16, 24]\n")
+    selection.write_text(
+        "temperature: 1.0\n"
+        "prompt_lengths: [16, 24]\n"
+        "prompt_anchors:\n"
+        "  - {name: after_f, start_1_based: 2285}\n"
+        "  - {name: after_h, start_1_based: 3918}\n"
+    )
 
     finalize_rollout_report(
         raw,
@@ -357,7 +363,16 @@ def test_final_report_reconciles_raw_and_representative_denominators(tmp_path):
     assert excluded["representative_safety_state"] == "NOT_SCREENED_PRE_SAFETY_QC"
     assert not excluded["target_profile_pass"]
     assert not excluded["hard_qc_pass"]
-    assert payload["sampling_selection"] == {"temperature": 1.0, "prompt_lengths": [16, 24]}
+    assert payload["sampling_selection"] == {
+        "temperature": 1.0,
+        "prompt_lengths": [16, 24],
+        "prompt_anchors": [
+            {"name": "after_f", "start_1_based": 2285},
+            {"name": "after_h", "start_1_based": 3918},
+        ],
+    }
+    assert payload["ranking"]["applied_to_accepted_candidate_order"] is False
+    assert payload["ranking"]["comparable_across_circular_prompt_origins"] is False
     assert payload["sequence_safety_provenance"]["tools"] == {"mmseqs": {"version": "test-mmseqs"}}
     assert payload["sequence_safety_provenance"]["databases"] == {"phrogs": {"version": "test-phrogs"}}
     assert (tmp_path / "accepted.fasta").read_text() == ">a\nAACG\n"

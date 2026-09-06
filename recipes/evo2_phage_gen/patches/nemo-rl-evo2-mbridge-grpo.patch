@@ -18,6 +18,15 @@ diff --git a/pyproject.toml b/pyproject.toml
  license = { text = "Apache 2.0" }
  maintainers = [
 
+diff --git a/nemo_rl/__init__.py b/nemo_rl/__init__.py
+--- a/nemo_rl/__init__.py
++++ b/nemo_rl/__init__.py
+@@ -56,0 +57,5 @@
++
++# Recipe-patch capability markers used by CUDA-free installation checks. Source-level
++# recipe tests separately verify their implementation sites.
++EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION = 2
++EVO2_RESPONSE_TERMINATION_VERSION = 1
 diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
 index e5647bae7..b8603d049 100644
 --- a/nemo_rl/algorithms/grpo.py
@@ -419,7 +428,7 @@ index 0a0721dd9..00eebb24a 100644
 +
 +
  class MegatronGenerationMixin:
-@@ -73,13 +84,62 @@ class MegatronGenerationMixin:
+@@ -73,13 +84,70 @@ class MegatronGenerationMixin:
          self._inference_loop = None
          self._inference_thread = None
 
@@ -472,6 +481,14 @@ index 0a0721dd9..00eebb24a 100644
 +        callback = getattr(adapter, "model_refit_complete", None)
 +        if callable(callback):
 +            callback(self)
++
++    def _generation_adapter_preserves_optimizer_state(self) -> bool:
++        """Return whether an adapter has opted to retain optimizer state during generation."""
++        adapter = self._load_generation_adapter()
++        preserve = getattr(adapter, "preserve_optimizer_state_during_generation", False)
++        if callable(preserve):
++            return bool(preserve(self))
++        return bool(preserve)
 +
      def _initialize_inference_engine(self, mcore_generation_config: dict) -> None:
          """Initialize the persistent inference engine and client."""
@@ -779,16 +796,58 @@ index e517e0298..e40a11294 100644
          self.refit_param_info_mcore = self._calculate_refit_param_info()
 
          # Collect tensor metadata for refit / hf side info
-@@ -1537,10 +1544,12 @@ class MegatronPolicyWorkerImpl(
+@@ -1382,6 +1389,7 @@ class MegatronPolicyWorkerImpl(
+             and self.optimizer is not None
+             and not self.optimizer_cpu_offload
+             and self.offload_optimizer_for_logprob
++            and not self._generation_adapter_preserves_optimizer_state()
+         ):
+             self.move_optimizer("cpu")
+
+@@ -1404,6 +1412,8 @@ class MegatronPolicyWorkerImpl(
+         ):
+             self.move_optimizer("cuda")
+
++        self._generation_offload_before_refit_complete = False
++
+         if self.cfg["megatron_cfg"]["empty_unused_memory_level"] >= 1:
+             torch.cuda.empty_cache()
+
+@@ -1518,9 +1528,12 @@ class MegatronPolicyWorkerImpl(
+             hasattr(self, "optimizer")
+             and self.optimizer is not None
+             and not self.optimizer_cpu_offload
++            and not self._generation_adapter_preserves_optimizer_state()
+         ):
+             self.move_optimizer("cpu")
+
++        self._generation_offload_before_refit_complete = True
++
+         gc.collect()
+         torch.cuda.empty_cache()
+
+@@ -1537,10 +1550,23 @@ class MegatronPolicyWorkerImpl(
          """Offload as much as possible on the CPU."""
          no_grad = torch.no_grad()
          no_grad.__enter__()
 -        self.model = self.move_model(self.model, "cpu")
-+        preserve_model_storage = self._generation_adapter_requires_persistent_model_storage()
-+        self.model = self.move_model(self.model, "cpu", move_params=not preserve_model_storage)
++        preserve_model_storage = (
++            self._generation_adapter_requires_persistent_model_storage()
++        )
++        prior_offload_complete = getattr(
++            self, "_generation_offload_before_refit_complete", False
++        )
++        self.model = self.move_model(
++            self.model,
++            "cpu",
++            move_params=not preserve_model_storage,
++            move_grads=False,
++        )
          self.model.eval()
          torch.randn(1).cuda()  # wake up torch allocator
-         self.offload_before_refit()  # rerun the old offload function
+-        self.offload_before_refit()  # rerun the old offload function
++        if not prior_offload_complete:
++            self.offload_before_refit()
 +        self._generation_adapter_model_refit_complete()
 
          allocated = torch.cuda.memory_allocated() / (1024**3)  # Convert to GB
@@ -1038,3 +1097,98 @@ index ad253cf3e..3e7a8ab24 100644
          logprobs = next_token_logprobs.gather(
              dim=-1, index=next_tokens.unsqueeze(-1)
          ).squeeze(-1)
+diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
+--- a/nemo_rl/experience/rollouts.py
++++ b/nemo_rl/experience/rollouts.py
+@@ -604,6 +604,14 @@ def collect_environment_metrics(
+     return metrics
+
+
++def _response_hit_generation_cap(message_log: list[dict[str, Any]], max_new_tokens: int) -> bool:
++    """Return whether any assistant response exhausted its generated-token budget."""
++    return any(
++        message["role"] == "assistant" and len(message["token_ids"]) >= max_new_tokens
++        for message in message_log
++    )
++
++
+ def run_multi_turn_rollout(
+     policy_generation: GenerationInterface,
+     input_batch: BatchedDataDict[DatumSpec],
+@@ -841,7 +849,9 @@ def run_multi_turn_rollout(
+         "total_turns": int(sample_turn_counts.sum().item()),
+         "avg_turns_per_sample": float(sample_turn_counts.float().mean().item()),
+         "max_turns_per_sample": int(sample_turn_counts.max().item()),
+-        "natural_termination_rate": float(sample_terminated.float().mean().item()),
++        "natural_termination_rate": float(
++            (sample_terminated & ~sample_truncated & ~sample_max_turns_reached).float().mean().item()
++        ),
+         "truncation_rate": float(sample_truncated.float().mean().item()),
+         "max_turns_reached_rate": float(sample_max_turns_reached.float().mean().item()),
+         # Token usage metrics
+@@ -1239,6 +1249,8 @@ def run_async_multi_turn_rollout(
+             "max_turns_per_sample": max(m["turn_count"] for m in all_sample_metrics),
+-            "natural_termination_rate": sum(m["terminated"] for m in all_sample_metrics)
+-            / batch_size,
++            "natural_termination_rate": sum(
++                m["terminated"] and not m["truncated"] and not m["max_turns_reached"]
++                for m in all_sample_metrics
++            ) / batch_size,
+             "truncation_rate": sum(m["truncated"] for m in all_sample_metrics)
+             / batch_size,
+             "max_turns_reached_rate": sum(
+@@ -1459,18 +1471,6 @@ def run_async_nemo_gym_rollout(
+     # Prepare for the rollout metrics calculation below. Not strictly necessary here, but good to have parity with `run_async_multi_turn_rollout`
+     with timer.time(f"{timer_prefix}/prepare_for_metrics_calculation"):
+         batch_size = len(nemo_gym_rows)
+-        if "vllm_cfg" in policy_generation.cfg:
+-            max_total_tokens_per_sample = policy_generation.cfg["vllm_cfg"][
+-                "max_model_len"
+-            ]
+-        elif "mcore_generation_config" in policy_generation.cfg:
+-            max_total_tokens_per_sample = policy_generation.cfg[
+-                "mcore_generation_config"
+-            ]["max_model_len"]
+-        else:
+-            max_total_tokens_per_sample = policy_generation.cfg[
+-                "max_total_sequence_length"
+-            ]
+         all_sample_metrics = [
+             {
+                 "total_reward": r["full_result"]["reward"],
+@@ -1481,8 +1479,9 @@ def run_async_nemo_gym_rollout(
+                 ),
+                 "total_tokens": sum(len(m["token_ids"]) for m in r["message_log"]),
+                 "turn_count": sum(1 for m in r["message_log"] if m["role"] == "user"),
+-                "hit_max_tokens": sum(len(m["token_ids"]) for m in r["message_log"])
+-                == max_total_tokens_per_sample,
++                "hit_max_tokens": _response_hit_generation_cap(
++                    r["message_log"], generation_config["max_new_tokens"]
++                ),
+             }
+             for r in results
+         ]
+
+diff --git a/nemo_rl/models/generation/megatron/megatron_worker.py b/nemo_rl/models/generation/megatron/megatron_worker.py
+--- a/nemo_rl/models/generation/megatron/megatron_worker.py
++++ b/nemo_rl/models/generation/megatron/megatron_worker.py
+@@ -673,6 +673,11 @@ class MegatronGenerationMixin:
+         unpadded_sequence_lengths = torch.zeros(
+             batch_size, dtype=torch.long, device=input_ids.device
+         )
++        response_truncated = torch.tensor(
++            [bool(getattr(request, "truncated", False)) for request in result],
++            dtype=torch.bool,
++            device=input_ids.device,
++        )
+         for i in range(batch_size):
+             tokens = result[i].prompt_tokens.tolist() + result[i].generated_tokens
+             seq_len = len(tokens)
+@@ -696,6 +701,7 @@ class MegatronGenerationMixin:
+             "logprobs": logprobs_padded,
+             "generation_lengths": generation_lengths,
+             "unpadded_sequence_lengths": unpadded_sequence_lengths,
++            "truncated": response_truncated,
+         }
+
+         return BatchedDataDict.from_batches([out_dict]).to("cpu")

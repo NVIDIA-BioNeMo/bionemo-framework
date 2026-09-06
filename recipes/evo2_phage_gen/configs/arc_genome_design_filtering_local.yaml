@@ -35,7 +35,7 @@ initialized_seqs_fasta_file_save_location: "qc1_initial_seqs.fasta"
 nucleotide_filtering: true
 nucleotide_character_filter: true
 genome_length_filter: true
-genome_length_range: [4000, 6000]
+genome_length_range: [5306, 5493]
 gc_content_filter: true
 gc_content_range: [30, 65]
 nucleotide_homopolymer_filter: true
@@ -99,6 +99,9 @@ mmseqs_db_protein_database: "recipes/evo2_phage_gen/data/external/phrogs/phrogs_
 mmseqs_protein_database_results_dir_save_location: "qc4_mmseqs_results_protein_database"
 mmseqs_protein_database_sensitivity: 4.0
 protein_database_hit_count: 7
+# PHROG targets are profile consensuses (calibrated at 0.75); the exact G target stays strict.
+protein_match_min_reciprocal_coverage: 0.75
+tropism_match_min_reciprocal_coverage: 0.95
 
 training_data_sequence_identity_filter: false
 training_data_genomes_fasta: "recipes/evo2_phage_gen/data/external/zenodo/microviridae_sft_training_data_raw.fna"
@@ -185,17 +188,19 @@ required_genes_list:
   - "terminase"
   - "endolysin"
   - "major spike protein"
+  # Repeated labels require distinct ORFs for B and D; A* is not emitted separately by ORFipy.
   - "DNA replication initiation"
   - "DNA condensation"
   - "major head protein"
   - "head morphogenesis"
+  - "head morphogenesis"
   - "nan" # Arc annotates NC_001422.1_ORF.15 as product=nan, function=unknown function.
   - "pilot protein for DNA ejection"
 required_genes_metrics_file_save_location: "qc6_required_genes_metrics.csv"
-required_genes_evidence_target: 9.0
+required_genes_evidence_target: 10.0
 
 syntenic_gene_count_filter: true
-# Strict Arc-template/paper-ready automated synteny gate.
+# Retained for Arc's call signature; the patched gate uses exact reference coverage and copy balance.
 syntenic_gene_count_range: [10, 12]
 total_gene_count_range: [10, 12]
 syntenic_total_gene_count_remove:

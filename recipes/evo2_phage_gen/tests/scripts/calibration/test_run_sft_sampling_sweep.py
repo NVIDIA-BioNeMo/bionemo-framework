@@ -47,6 +47,10 @@ def test_sampling_sweep_dry_run_materializes_marker_only_parallel_plan(tmp_path:
 
     sweep_config = json.loads((run_root / "sweep_config.json").read_text())
     assert sweep_config["topology"] == {"gpu_ids": [0, 1], "tensor_parallel_size": 1, "replicas": 2}
+    assert sweep_config["target_length"] == 5444
+    assert sweep_config["max_seq_length"] == 10240
+    assert sweep_config["top_k"] == 5
+    assert sweep_config["top_p"] == 1.0
     assert sweep_config["cells"] == [
         "prefix0_temp0.7",
         "prefix4_temp0.7",
@@ -69,3 +73,28 @@ def test_sampling_workers_use_dedicated_input_and_guard_token_budget() -> None:
     assert "if (( max_new_tokens <= 0 )); then" in script
     assert "sampling_calibration print-command" in script
     assert "mapfile -d '' -t inference_command" in script
+
+
+def test_sampling_sweep_rejects_reference_without_anchors(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    completed = subprocess.run(
+        ["bash", str(SCRIPT)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "SOURCE_ENV": "0",
+            "RECIPE_ROOT": str(RECIPE_ROOT),
+            "RUN_ROOT": str(tmp_path / "sweep"),
+            "CKPT_DIR": str(checkpoint),
+            "REFERENCE_FASTA": str(tmp_path / "reference.fasta"),
+            "GPU_IDS": "0",
+        },
+        cwd=RECIPE_ROOT,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert "PROMPT_ANCHORS is required with REFERENCE_FASTA" in completed.stderr

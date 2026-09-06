@@ -68,6 +68,13 @@ def canonical_circular_sequence(sequence: str) -> str:
     return min(_least_rotation(sequence), _least_rotation(reverse_complement))
 
 
+def _canonical_circular_sequence_if_supported(sequence: str) -> str | None:
+    sequence = sequence.upper()
+    if set(sequence) - IUPAC_SYMBOLS:
+        return None
+    return canonical_circular_sequence(sequence)
+
+
 def _read_fasta_records(path: Path) -> list[tuple[str, str]]:
     records: list[tuple[str, str]] = []
     record_id: str | None = None
@@ -110,7 +117,7 @@ def normalize_prompted_fasta(source: Path, output: Path) -> Path:
 
 def _load_sweep(generation_root: Path) -> pd.DataFrame:
     rows = []
-    for path in sorted((generation_root / "jsonl").glob("prefix*_temp*.jsonl")):
+    for path in sorted((generation_root / "jsonl").glob("*prefix*_temp*.jsonl")):
         cell = path.stem
         frame = load_generation_records(path)
         frame["cell"] = cell
@@ -168,7 +175,7 @@ def _top_hits(path: Path, prefix: str) -> pd.DataFrame:
     return hits.rename(
         columns={
             "query": "id_prompt",
-            **{column: f"{prefix}_{column}" for column in SEARCH_COLUMNS if column not in {"query"}},
+            **{column: f"{prefix}_{column}" for column in SEARCH_COLUMNS if column != "query"},
         }
     )
 
@@ -225,7 +232,9 @@ def measure_novelty(
         canonical_circular_sequence(sequence) for sequence in _read_fasta_sequences(reference_payload_fasta)
     }
     sft_hashes = {canonical_circular_sequence(sequence) for sequence in _read_fasta_sequences(sft_payload_fasta)}
-    canonical = sweep["sequence"].map(canonical_circular_sequence)
+    # Non-DNA model samples are valid negative calibration outcomes. They cannot be exact genome
+    # copies, but should not abort novelty measurement for the rest of the sweep.
+    canonical = sweep["sequence"].map(_canonical_circular_sequence_if_supported)
     metrics = sweep[["id_prompt", "cell"]].copy()
     metrics["exact_target_circular_or_revcomp"] = canonical.isin(target_hashes).astype(float)
     metrics["exact_sft_circular_or_revcomp"] = canonical.isin(sft_hashes).astype(float)

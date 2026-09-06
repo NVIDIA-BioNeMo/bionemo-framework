@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -33,11 +34,6 @@ class _GenerationWorkerMixin:
 
     def _generation_adapter_model_refit_complete(self):
         return None
-
-
-class _StorageOnlyGenerationWorkerMixin:
-    def _generation_adapter_requires_persistent_model_storage(self):
-        return False
 
 
 def _cached_source() -> Path | None:
@@ -134,8 +130,15 @@ assert torch.equal(ordinary_mask, replay_mask)
 
     worker = (build / "nemo_rl" / "models" / "policy" / "workers" / "megatron_policy_worker.py").read_text()
     assert "self._generation_adapter_requires_persistent_model_storage()" in worker
-    assert 'self.model, "cpu", move_params=not preserve_model_storage' in worker
     assert "self._generation_adapter_model_refit_complete()" in worker
+    assert 'getattr(self, "_generation_offload_before_refit_complete", False)' in worker
+    assert "and not self._generation_adapter_preserves_optimizer_state()" in worker
+    generation_worker = (build / "nemo_rl" / "models" / "generation" / "megatron" / "megatron_worker.py").read_text()
+    assert "def _generation_adapter_requires_persistent_model_storage(" in generation_worker
+    assert "def _generation_adapter_model_refit_complete(" in generation_worker
+    assert "def _generation_adapter_preserves_optimizer_state(" in generation_worker
+    package_init = (build / "nemo_rl" / "__init__.py").read_text()
+    assert "EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION = 2" in package_init
 
 
 def test_environment_metrics_receive_one_task_namespace(tmp_path: Path) -> None:
@@ -148,6 +151,43 @@ def test_environment_metrics_receive_one_task_namespace(tmp_path: Path) -> None:
 
     assert 'key.startswith("__timing__/")' in rollout_source
     assert 'metric_key = key if key.startswith("__timing__/") else f"{task_name}/{key}"' in rollout_source
+
+
+def test_patch_preserves_response_termination_metadata(tmp_path: Path) -> None:
+    """Allocator padding must not turn capped generations into natural stops."""
+    source = _cached_source()
+    if source is None:
+        pytest.skip("configured NeMo-RL source is not cached")
+    build = nemo_rl_setup._copy_build_source(source, tmp_path / "build")
+    nemo_rl_setup.apply_source_patch(build)
+
+    worker_source = (build / "nemo_rl" / "models" / "generation" / "megatron" / "megatron_worker.py").read_text()
+    assert 'bool(getattr(request, "truncated", False))' in worker_source
+    assert '"truncated": response_truncated' in worker_source
+
+    rollout_path = build / "nemo_rl" / "experience" / "rollouts.py"
+    rollout_source = rollout_path.read_text()
+    tree = ast.parse(rollout_source)
+    helper_node = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_response_hit_generation_cap"
+    )
+    namespace: dict[str, object] = {}
+    exec(compile(ast.Module(body=[helper_node], type_ignores=[]), str(rollout_path), "exec"), namespace)
+    helper = namespace["_response_hit_generation_cap"]
+    assert callable(helper)
+    message_log = [
+        {"role": "user", "token_ids": list(range(100))},
+        {"role": "assistant", "token_ids": [1, 2, 3, 4]},
+    ]
+    assert helper(message_log, 5) is False
+    message_log[-1]["token_ids"].append(5)
+    assert helper(message_log, 5) is True
+    assert "sample_terminated & ~sample_truncated & ~sample_max_turns_reached" in rollout_source
+    assert 'm["terminated"] and not m["truncated"] and not m["max_turns_reached"]' in rollout_source
+    assert "max_total_tokens_per_sample" not in rollout_source[rollout_source.index("def run_async_nemo_gym_rollout") :]
+
+    package_init = (build / "nemo_rl" / "__init__.py").read_text()
+    assert "EVO2_RESPONSE_TERMINATION_VERSION = 1" in package_init
 
 
 def test_setup_patches_before_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,6 +228,8 @@ def test_runtime_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(nemo_rl_setup, "_runtime_is_complete", lambda: True)
 
     def import_module(name):
+        if name == "nemo_rl":
+            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=2, EVO2_RESPONSE_TERMINATION_VERSION=1)
         if name.endswith(".grpo"):
             return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
         if name.endswith(".datasets.utils"):
@@ -197,7 +239,7 @@ def test_runtime_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
                 apply_top_k_top_p=lambda logits, top_k, top_p, chunk_size=None, target_token_ids=None: logits
             )
         if name.endswith(".megatron_worker"):
-            return SimpleNamespace(MegatronGenerationMixin=_GenerationWorkerMixin)
+            raise AssertionError("the CUDA-free runtime check must not import the Megatron worker")
         return SimpleNamespace(init_ray=init_ray)
 
     monkeypatch.setattr(nemo_rl_setup.importlib, "import_module", import_module)
@@ -211,6 +253,8 @@ def test_runtime_capabilities_require_external_dataset_resolution(monkeypatch: p
         return None
 
     def import_module(name):
+        if name == "nemo_rl":
+            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=2, EVO2_RESPONSE_TERMINATION_VERSION=1)
         if name.endswith(".grpo"):
             return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
         if name.endswith(".datasets.utils"):
@@ -237,6 +281,8 @@ def test_runtime_requires_sampled_action_support(monkeypatch: pytest.MonkeyPatch
         return None
 
     def import_module(name):
+        if name == "nemo_rl":
+            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=2, EVO2_RESPONSE_TERMINATION_VERSION=1)
         if name.endswith(".grpo"):
             return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
         if name.endswith(".datasets.utils"):
@@ -254,24 +300,15 @@ def test_runtime_requires_sampled_action_support(monkeypatch: pytest.MonkeyPatch
         nemo_rl_setup.assert_nemo_rl_runtime()
 
 
-@pytest.mark.parametrize(
-    ("generation_mixin", "expected_error"),
-    [
-        (SimpleNamespace, "preserve CUDA-graph model storage"),
-        (_StorageOnlyGenerationWorkerMixin, "refresh quantized CUDA graphs"),
-    ],
-)
-def test_runtime_requires_graph_storage_lifecycle(
-    monkeypatch: pytest.MonkeyPatch,
-    generation_mixin,
-    expected_error,
-) -> None:
-    """A stale install must expose both graph-storage lifecycle hooks."""
+def test_runtime_requires_current_colocated_refit_lifecycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale install must not bypass the current colocated-refit lifecycle."""
 
     def init_ray(log_dir=None, *, include_dashboard=True, num_cpus=None):
         return None
 
     def import_module(name):
+        if name == "nemo_rl":
+            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=1)
         if name.endswith(".grpo"):
             return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
         if name.endswith(".datasets.utils"):
@@ -281,11 +318,39 @@ def test_runtime_requires_graph_storage_lifecycle(
                 apply_top_k_top_p=lambda logits, top_k, top_p, chunk_size=None, target_token_ids=None: logits
             )
         if name.endswith(".megatron_worker"):
-            return SimpleNamespace(MegatronGenerationMixin=generation_mixin)
+            raise AssertionError("the CUDA-free runtime check must not import the Megatron worker")
         return SimpleNamespace(init_ray=init_ray)
 
     monkeypatch.setattr(nemo_rl_setup, "_runtime_is_complete", lambda: True)
     monkeypatch.setattr(nemo_rl_setup.importlib, "import_module", import_module)
 
-    with pytest.raises(RuntimeError, match=expected_error):
+    with pytest.raises(RuntimeError, match="required Evo2 colocated-refit lifecycle support"):
+        nemo_rl_setup.assert_nemo_rl_runtime()
+
+
+def test_runtime_requires_exact_response_termination(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale install must not silently misclassify length-capped responses."""
+
+    def init_ray(log_dir=None, *, include_dashboard=True, num_cpus=None):
+        return None
+
+    def import_module(name):
+        if name == "nemo_rl":
+            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=2)
+        if name.endswith(".grpo"):
+            return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
+        if name.endswith(".datasets.utils"):
+            return SimpleNamespace(resolve_external_dataset_class=lambda name: name)
+        if name.endswith(".logits_sampling_utils"):
+            return SimpleNamespace(
+                apply_top_k_top_p=lambda logits, top_k, top_p, chunk_size=None, target_token_ids=None: logits
+            )
+        if name.endswith(".megatron_worker"):
+            raise AssertionError("the CUDA-free runtime check must not import the Megatron worker")
+        return SimpleNamespace(init_ray=init_ray)
+
+    monkeypatch.setattr(nemo_rl_setup, "_runtime_is_complete", lambda: True)
+    monkeypatch.setattr(nemo_rl_setup.importlib, "import_module", import_module)
+
+    with pytest.raises(RuntimeError, match="exact generated-response termination support"):
         nemo_rl_setup.assert_nemo_rl_runtime()
