@@ -236,7 +236,8 @@
         "Synthetic flattening padding has zero action loss while the terminal EOD has action loss enabled.",
         "Biological QC scores only the nucleotide text before EOD.",
         "Filtered replay keeps sampled EOD in normalized support with a finite log-probability instead of zeroing or masking it.",
-        "Generation-versus-replay mismatch telemetry remains active."
+        "Generation-versus-replay mismatch telemetry remains active.",
+        "It derives capped versus natural termination from explicit response metadata or max_new_tokens rather than allocator-rounded max_model_len, and cross-checks retained EOD token IDs."
       ],
       "expected_skill": "bionemo-phage-design-operate-nemo-rl",
       "expected_script": null

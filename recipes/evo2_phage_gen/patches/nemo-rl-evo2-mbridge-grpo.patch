@@ -21,11 +21,12 @@ diff --git a/pyproject.toml b/pyproject.toml
 diff --git a/nemo_rl/__init__.py b/nemo_rl/__init__.py
 --- a/nemo_rl/__init__.py
 +++ b/nemo_rl/__init__.py
-@@ -56,0 +57,4 @@
+@@ -56,0 +57,5 @@
 +
-+# Recipe-patch capability marker used by CUDA-free installation checks. The source-level
-+# recipe tests separately verify the worker and policy-offload implementation sites.
++# Recipe-patch capability markers used by CUDA-free installation checks. Source-level
++# recipe tests separately verify their implementation sites.
 +EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION = 2
++EVO2_RESPONSE_TERMINATION_VERSION = 1
 diff --git a/nemo_rl/algorithms/grpo.py b/nemo_rl/algorithms/grpo.py
 index e5647bae7..b8603d049 100644
 --- a/nemo_rl/algorithms/grpo.py
@@ -1096,3 +1097,98 @@ index ad253cf3e..3e7a8ab24 100644
          logprobs = next_token_logprobs.gather(
              dim=-1, index=next_tokens.unsqueeze(-1)
          ).squeeze(-1)
+diff --git a/nemo_rl/experience/rollouts.py b/nemo_rl/experience/rollouts.py
+--- a/nemo_rl/experience/rollouts.py
++++ b/nemo_rl/experience/rollouts.py
+@@ -604,6 +604,14 @@ def collect_environment_metrics(
+     return metrics
+
+
++def _response_hit_generation_cap(message_log: list[dict[str, Any]], max_new_tokens: int) -> bool:
++    """Return whether any assistant response exhausted its generated-token budget."""
++    return any(
++        message["role"] == "assistant" and len(message["token_ids"]) >= max_new_tokens
++        for message in message_log
++    )
++
++
+ def run_multi_turn_rollout(
+     policy_generation: GenerationInterface,
+     input_batch: BatchedDataDict[DatumSpec],
+@@ -841,7 +849,9 @@ def run_multi_turn_rollout(
+         "total_turns": int(sample_turn_counts.sum().item()),
+         "avg_turns_per_sample": float(sample_turn_counts.float().mean().item()),
+         "max_turns_per_sample": int(sample_turn_counts.max().item()),
+-        "natural_termination_rate": float(sample_terminated.float().mean().item()),
++        "natural_termination_rate": float(
++            (sample_terminated & ~sample_truncated & ~sample_max_turns_reached).float().mean().item()
++        ),
+         "truncation_rate": float(sample_truncated.float().mean().item()),
+         "max_turns_reached_rate": float(sample_max_turns_reached.float().mean().item()),
+         # Token usage metrics
+@@ -1239,6 +1249,8 @@ def run_async_multi_turn_rollout(
+             "max_turns_per_sample": max(m["turn_count"] for m in all_sample_metrics),
+-            "natural_termination_rate": sum(m["terminated"] for m in all_sample_metrics)
+-            / batch_size,
++            "natural_termination_rate": sum(
++                m["terminated"] and not m["truncated"] and not m["max_turns_reached"]
++                for m in all_sample_metrics
++            ) / batch_size,
+             "truncation_rate": sum(m["truncated"] for m in all_sample_metrics)
+             / batch_size,
+             "max_turns_reached_rate": sum(
+@@ -1459,18 +1471,6 @@ def run_async_nemo_gym_rollout(
+     # Prepare for the rollout metrics calculation below. Not strictly necessary here, but good to have parity with `run_async_multi_turn_rollout`
+     with timer.time(f"{timer_prefix}/prepare_for_metrics_calculation"):
+         batch_size = len(nemo_gym_rows)
+-        if "vllm_cfg" in policy_generation.cfg:
+-            max_total_tokens_per_sample = policy_generation.cfg["vllm_cfg"][
+-                "max_model_len"
+-            ]
+-        elif "mcore_generation_config" in policy_generation.cfg:
+-            max_total_tokens_per_sample = policy_generation.cfg[
+-                "mcore_generation_config"
+-            ]["max_model_len"]
+-        else:
+-            max_total_tokens_per_sample = policy_generation.cfg[
+-                "max_total_sequence_length"
+-            ]
+         all_sample_metrics = [
+             {
+                 "total_reward": r["full_result"]["reward"],
+@@ -1481,8 +1479,9 @@ def run_async_nemo_gym_rollout(
+                 ),
+                 "total_tokens": sum(len(m["token_ids"]) for m in r["message_log"]),
+                 "turn_count": sum(1 for m in r["message_log"] if m["role"] == "user"),
+-                "hit_max_tokens": sum(len(m["token_ids"]) for m in r["message_log"])
+-                == max_total_tokens_per_sample,
++                "hit_max_tokens": _response_hit_generation_cap(
++                    r["message_log"], generation_config["max_new_tokens"]
++                ),
+             }
+             for r in results
+         ]
+
+diff --git a/nemo_rl/models/generation/megatron/megatron_worker.py b/nemo_rl/models/generation/megatron/megatron_worker.py
+--- a/nemo_rl/models/generation/megatron/megatron_worker.py
++++ b/nemo_rl/models/generation/megatron/megatron_worker.py
+@@ -673,6 +673,11 @@ class MegatronGenerationMixin:
+         unpadded_sequence_lengths = torch.zeros(
+             batch_size, dtype=torch.long, device=input_ids.device
+         )
++        response_truncated = torch.tensor(
++            [bool(getattr(request, "truncated", False)) for request in result],
++            dtype=torch.bool,
++            device=input_ids.device,
++        )
+         for i in range(batch_size):
+             tokens = result[i].prompt_tokens.tolist() + result[i].generated_tokens
+             seq_len = len(tokens)
+@@ -696,6 +701,7 @@ class MegatronGenerationMixin:
+             "logprobs": logprobs_padded,
+             "generation_lengths": generation_lengths,
+             "unpadded_sequence_lengths": unpadded_sequence_lengths,
++            "truncated": response_truncated,
+         }
+
+         return BatchedDataDict.from_batches([out_dict]).to("cpu")

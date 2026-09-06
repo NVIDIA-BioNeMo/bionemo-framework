@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -152,6 +153,43 @@ def test_environment_metrics_receive_one_task_namespace(tmp_path: Path) -> None:
     assert 'metric_key = key if key.startswith("__timing__/") else f"{task_name}/{key}"' in rollout_source
 
 
+def test_patch_preserves_response_termination_metadata(tmp_path: Path) -> None:
+    """Allocator padding must not turn capped generations into natural stops."""
+    source = _cached_source()
+    if source is None:
+        pytest.skip("configured NeMo-RL source is not cached")
+    build = nemo_rl_setup._copy_build_source(source, tmp_path / "build")
+    nemo_rl_setup.apply_source_patch(build)
+
+    worker_source = (build / "nemo_rl" / "models" / "generation" / "megatron" / "megatron_worker.py").read_text()
+    assert 'bool(getattr(request, "truncated", False))' in worker_source
+    assert '"truncated": response_truncated' in worker_source
+
+    rollout_path = build / "nemo_rl" / "experience" / "rollouts.py"
+    rollout_source = rollout_path.read_text()
+    tree = ast.parse(rollout_source)
+    helper_node = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_response_hit_generation_cap"
+    )
+    namespace: dict[str, object] = {}
+    exec(compile(ast.Module(body=[helper_node], type_ignores=[]), str(rollout_path), "exec"), namespace)
+    helper = namespace["_response_hit_generation_cap"]
+    assert callable(helper)
+    message_log = [
+        {"role": "user", "token_ids": list(range(100))},
+        {"role": "assistant", "token_ids": [1, 2, 3, 4]},
+    ]
+    assert helper(message_log, 5) is False
+    message_log[-1]["token_ids"].append(5)
+    assert helper(message_log, 5) is True
+    assert "sample_terminated & ~sample_truncated & ~sample_max_turns_reached" in rollout_source
+    assert 'm["terminated"] and not m["truncated"] and not m["max_turns_reached"]' in rollout_source
+    assert "max_total_tokens_per_sample" not in rollout_source[rollout_source.index("def run_async_nemo_gym_rollout") :]
+
+    package_init = (build / "nemo_rl" / "__init__.py").read_text()
+    assert "EVO2_RESPONSE_TERMINATION_VERSION = 1" in package_init
+
+
 def test_setup_patches_before_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = tmp_path / "source"
     (source / "nemo_rl" / "algorithms").mkdir(parents=True)
@@ -191,7 +229,7 @@ def test_runtime_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def import_module(name):
         if name == "nemo_rl":
-            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=2)
+            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=2, EVO2_RESPONSE_TERMINATION_VERSION=1)
         if name.endswith(".grpo"):
             return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
         if name.endswith(".datasets.utils"):
@@ -216,7 +254,7 @@ def test_runtime_capabilities_require_external_dataset_resolution(monkeypatch: p
 
     def import_module(name):
         if name == "nemo_rl":
-            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=2)
+            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=2, EVO2_RESPONSE_TERMINATION_VERSION=1)
         if name.endswith(".grpo"):
             return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
         if name.endswith(".datasets.utils"):
@@ -244,7 +282,7 @@ def test_runtime_requires_sampled_action_support(monkeypatch: pytest.MonkeyPatch
 
     def import_module(name):
         if name == "nemo_rl":
-            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=2)
+            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=2, EVO2_RESPONSE_TERMINATION_VERSION=1)
         if name.endswith(".grpo"):
             return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
         if name.endswith(".datasets.utils"):
@@ -287,4 +325,32 @@ def test_runtime_requires_current_colocated_refit_lifecycle(monkeypatch: pytest.
     monkeypatch.setattr(nemo_rl_setup.importlib, "import_module", import_module)
 
     with pytest.raises(RuntimeError, match="required Evo2 colocated-refit lifecycle support"):
+        nemo_rl_setup.assert_nemo_rl_runtime()
+
+
+def test_runtime_requires_exact_response_termination(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale install must not silently misclassify length-capped responses."""
+
+    def init_ray(log_dir=None, *, include_dashboard=True, num_cpus=None):
+        return None
+
+    def import_module(name):
+        if name == "nemo_rl":
+            return SimpleNamespace(EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION=2)
+        if name.endswith(".grpo"):
+            return SimpleNamespace(split_environment_timing_metrics=lambda metrics: (metrics, {}))
+        if name.endswith(".datasets.utils"):
+            return SimpleNamespace(resolve_external_dataset_class=lambda name: name)
+        if name.endswith(".logits_sampling_utils"):
+            return SimpleNamespace(
+                apply_top_k_top_p=lambda logits, top_k, top_p, chunk_size=None, target_token_ids=None: logits
+            )
+        if name.endswith(".megatron_worker"):
+            raise AssertionError("the CUDA-free runtime check must not import the Megatron worker")
+        return SimpleNamespace(init_ray=init_ray)
+
+    monkeypatch.setattr(nemo_rl_setup, "_runtime_is_complete", lambda: True)
+    monkeypatch.setattr(nemo_rl_setup.importlib, "import_module", import_module)
+
+    with pytest.raises(RuntimeError, match="exact generated-response termination support"):
         nemo_rl_setup.assert_nemo_rl_runtime()

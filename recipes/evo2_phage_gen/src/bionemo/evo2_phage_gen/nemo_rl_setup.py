@@ -160,6 +160,8 @@ def assert_nemo_rl_runtime() -> None:
     # and source-level tests verify the corresponding worker/offload hooks directly.
     if getattr(nemo_rl_package, "EVO2_GRAPH_STORAGE_LIFECYCLE_VERSION", 0) < 2:
         raise RuntimeError("NeMo-RL is missing required Evo2 colocated-refit lifecycle support")
+    if getattr(nemo_rl_package, "EVO2_RESPONSE_TERMINATION_VERSION", 0) < 1:
+        raise RuntimeError("NeMo-RL is missing exact generated-response termination support")
     parameters = inspect.signature(cluster.init_ray).parameters
     if not {"include_dashboard", "num_cpus"}.issubset(parameters):
         raise RuntimeError("NeMo-RL is missing local Ray resource controls")
