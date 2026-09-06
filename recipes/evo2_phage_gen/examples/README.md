@@ -142,6 +142,8 @@ decode batch contains two prompt records, while the global update contains all e
 strata: two prompt records and 96 generated sequences per stratum. Validation remains a separate
 96-record mixture. The 1,000-design final rollout uses 125 prompts per stratum: two 500-record,
 same-length files alternate four anchors and combine to exactly 1,000 records.
+Each GPU generates its shard in packed batches of 96 by default; set
+`FINAL_PROMPT_BATCH_SIZE` only when qualifying a different device profile.
 The 768-point completed one cold 8×H100 rollout, QC, replay, backward, and optimizer update with no
 replay masks; 1,024 failed recurrent-state allocation before decode, so it is not a supported
 one-wave setting. The standard multi-update pilot remains the steady-state qualification.

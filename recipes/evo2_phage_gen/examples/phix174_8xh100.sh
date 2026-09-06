@@ -68,6 +68,8 @@ PHAROKKA_DATABASE_RELEASE="${PHAROKKA_DATABASE_RELEASE:-Pharokka database v1.11.
 CALIBRATION_WORKERS="${CALIBRATION_WORKERS:-8}"
 # Global rollout 768 over DP8 gives 96 local requests. This is distinct from policy training MBS.
 RL_PROMPT_BATCH_SIZE="${RL_PROMPT_BATCH_SIZE:-96}"
+# Standalone final generation has no optimizer state resident, so reuse the qualified local wave.
+FINAL_PROMPT_BATCH_SIZE="${FINAL_PROMPT_BATCH_SIZE:-96}"
 # MBS8 is the conservative H100 start. Offload-cache MBS32 passed two steady-state GB300 updates,
 # but that does not establish H100 capacity; TP1 MBS64 also exceeds the signed-int32 local GLU span.
 RL_TRAIN_MICRO_BATCH_SIZE="${RL_TRAIN_MICRO_BATCH_SIZE:-8}"
@@ -78,6 +80,10 @@ SAFETY_PHROGS_THREADS="${SAFETY_PHROGS_THREADS:-64}"
 PHIX174_HOST_EVIDENCE_JSON='{"source":"NCBI Datasets v2alpha genome dataset report","source_version":"NCBI Datasets v2alpha API","replication_host_domains":["BACTERIA"],"confirmed":true,"metadata":{"accession":"NC_001422.1","intended_design_context":"PhiX/Microviridae bacterial phage"}}'
 if [[ ! "${RL_PROMPT_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
   printf 'RL_PROMPT_BATCH_SIZE must be a positive integer; got %q\n' "${RL_PROMPT_BATCH_SIZE}" >&2
+  exit 2
+fi
+if [[ ! "${FINAL_PROMPT_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'FINAL_PROMPT_BATCH_SIZE must be a positive integer; got %q\n' "${FINAL_PROMPT_BATCH_SIZE}" >&2
   exit 2
 fi
 if [[ ! "${RL_TRAIN_MICRO_BATCH_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
@@ -699,6 +705,7 @@ fi
 note "planned topology: ${NUM_GPUS} GPUs, SFT tensor parallel ${SFT_TENSOR_PARALLEL_SIZE}, ${NUM_CPUS} logical CPUs; inference precision ${INFERENCE_PRECISION_NAME}"
 python - "${RESULT_ROOT}/settings.json" "${NUM_GPUS}" "${NUM_CPUS}" "${gpu_type}" \
   "${SFT_TENSOR_PARALLEL_SIZE}" "${SFT_MAX_STEPS}" "${RL_TRAIN_MICRO_BATCH_SIZE}" \
+  "${FINAL_PROMPT_BATCH_SIZE}" \
   "${MODEL_VARIANT}" "${BASE_CHECKPOINT_RESOURCE}" "${MODEL_SIZE}" \
   "${WANDB_ENABLED}" "${WANDB_ENTITY_NAME}" "${WANDB_SFT_PROJECT_NAME}" "${WANDB_RL_PROJECT_NAME}" \
   "${WANDB_SFT_RUN_NAME}" "${WANDB_RL_RUN_NAME}" "${WANDB_INIT_TIMEOUT}" \
@@ -715,6 +722,7 @@ from pathlib import Path
     sft_tensor_parallel_size,
     sft_max_steps,
     rl_train_micro_batch_size,
+    final_prompt_batch_size,
     model_variant,
     base_checkpoint,
     model_size,
@@ -735,6 +743,7 @@ settings = {
     "sft_tensor_parallel_size": int(sft_tensor_parallel_size),
     "sft_max_steps": int(sft_max_steps),
     "rl_train_micro_batch_size": int(rl_train_micro_batch_size),
+    "final_prompt_batch_size": int(final_prompt_batch_size),
     "model_variant": model_variant,
     "base_checkpoint": base_checkpoint,
     "model_size": model_size,
@@ -1098,7 +1107,8 @@ stage_50() {
         --temperature "${SAMPLING_TEMPERATURE}" --top-k "${SAMPLING_TOP_K}" \
         --top-p "${SAMPLING_TOP_P}" --seed "$((SAMPLING_ROLLOUT_SEED + rank * SAMPLING_SEED_STRIDE))" \
         --tensor-parallel-size 1 \
-        --max-seq-length "${RL_MAX_MODEL_LEN}" --prompt-batch-size 16 --inference-backend dynamic \
+        --max-seq-length "${RL_MAX_MODEL_LEN}" --prompt-batch-size "${FINAL_PROMPT_BATCH_SIZE}" \
+        --inference-backend dynamic \
         ${INFERENCE_PRECISION_ARGS[@]+"${INFERENCE_PRECISION_ARGS[@]}"} \
         --preserve-eos-token --strict-generation --stream-output \
         --output-file "${outputs[rank]}")
