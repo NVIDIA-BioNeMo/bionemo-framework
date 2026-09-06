@@ -37,7 +37,7 @@ class Evo2PreprocessingConfig(BaseModel):
     embed_reverse_complement: bool = False
     # For every sequence, randomly reverse complement the sequence with the specified probability instead of using the original sequence.
     random_reverse_complement: float = 0.0
-    # For sequences associated with taxonomic lineages specified in `taxonomy_data`, randomly drop out nodes of the lineage with the specified probability. For instance: |d__KINGDOM;p__None;c__CLASS;o__None;f__None;g__None;s__None|
+    # For sequences associated with taxonomic lineages specified in `taxonomy_data`, randomly drop out nodes of the lineage with the specified probability. For instance: |d__DOMAIN;p__None;c__CLASS;o__None;f__None;g__None;s__None|
     random_lineage_dropout: float = 0.0
     # Transcribe (DNA -> RNA) or Back-Transcribe (RNA -> DNA) the sequence before tokenization.
     transcribe: None | Literal["transcribe", "back_transcribe"] = None
@@ -97,7 +97,7 @@ Furthermore, the `taxonomy_data` field contains a map from sequence ID substring
 class Evo2TaxonomyLineage(BaseModel):
     """Pydantic model class that defines the source lineage of a DNA sequence."""
 
-    kingdom: None | str = None
+    domain: None | str = None
     phylum: None | str = None
     clazz: None | str = None
     order: None | str = None
