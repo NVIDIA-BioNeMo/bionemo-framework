@@ -96,6 +96,36 @@ def test_measure_novelty_normalizes_target_reference_before_search_and_keying(tm
     assert metrics.loc[0, "exact_target_circular_or_revcomp"] == 1.0
 
 
+def test_measure_novelty_marks_non_iupac_generation_as_not_an_exact_copy(tmp_path, monkeypatch):
+    reference = tmp_path / "reference.fna"
+    reference.write_text(">reference\nACGT\n")
+    sft = tmp_path / "sft.fna"
+    sft.write_text(">sft\nACGT\n")
+    monkeypatch.setattr(
+        novelty,
+        "_load_sweep",
+        lambda _root: pd.DataFrame({"id_prompt": ["generated"], "cell": ["cell"], "sequence": ["ACGT$"]}),
+    )
+
+    def fake_search(_binary, _query, _search_reference, output, *_args):
+        output.touch()
+
+    monkeypatch.setattr(novelty, "_run_search", fake_search)
+
+    metrics = measure_novelty(
+        generation_root=tmp_path / "generation",
+        reference_fasta=reference,
+        sft_fasta=sft,
+        tool_bin_dir=tmp_path,
+        work_dir=tmp_path / "work",
+        output_csv=tmp_path / "metrics.csv",
+        threads=1,
+    )
+
+    assert metrics.loc[0, "exact_target_circular_or_revcomp"] == 0.0
+    assert metrics.loc[0, "exact_sft_circular_or_revcomp"] == 0.0
+
+
 def test_summarize_novelty_reports_copy_rates():
     metrics = pd.DataFrame(
         {
